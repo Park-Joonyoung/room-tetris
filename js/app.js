@@ -652,13 +652,17 @@ async function openEditor(layout) {
   let items = structuredClone(layout.items);
   // 이 배치도가 배치될 때 쓴 간격·앞 여유 공간. 화면 표시와 달라붙기는 이 값을 따른다.
   // (이 값이 생기기 전에 만든 배치도는 이 기기의 설정을 쓴다.)
-  let rules = { gap: layout.gap ?? db.settings.gap, margin: layout.margin ?? db.settings.margin };
-  const stateJson = () => JSON.stringify({ items, rules });
+  const rules = { gap: layout.gap ?? db.settings.gap, margin: layout.margin ?? db.settings.margin };
+  const stateJson = () => JSON.stringify(items);
   let savedJson = stateJson();
-  // 배치도의 앞 여유 공간이 이 기기의 설정과 다르면 보기만 할 수 있다.
+  // 배치도의 간격이나 앞 여유 공간이 이 기기의 설정과 다르면 보기만 할 수 있다.
   // 다른 기준으로 섞어 고치면 배치가 어느 기준에도 맞지 않게 되기 때문이다.
-  const readOnly = layout.margin !== undefined && layout.margin !== db.settings.margin;
-  const readOnlyText = `읽기 전용: 이 배치도의 앞 여유 공간(${num(rules.margin)}cm)이 이 기기의 설정(${num(db.settings.margin)}cm)과 달라서 수정할 수 없어요. 수정하려면 배치도를 새로 만들어 주세요.`;
+  const mismatches = [
+    { name: '간격', own: layout.gap, device: db.settings.gap },
+    { name: '앞 여유 공간', own: layout.margin, device: db.settings.margin },
+  ].filter((m) => m.own !== undefined && m.own !== m.device);
+  const readOnly = mismatches.length > 0;
+  const readOnlyText = `읽기 전용: 이 배치도의 ${mismatches.map((m) => `${m.name}(${num(m.own)}cm)`).join('과 ')}이 이 기기의 설정(${mismatches.map((m) => `${num(m.device)}cm`).join(', ')})과 달라서 수정할 수 없어요. 수정하려면 배치도를 새로 만들어 주세요.`;
   const blockedEdit = () => toast(readOnlyText, 5000);
   const history = [];
   let view = null;
@@ -811,27 +815,22 @@ async function openEditor(layout) {
   function undo() {
     const prev = history.pop();
     if (!prev) return;
-    ({ items, rules } = JSON.parse(prev));
+    items = JSON.parse(prev);
     refresh();
   }
 
   async function rearrange() {
     if (!items.length) return toast('배치할 가구가 없어요.');
     arrangeBtn.disabled = true;
-    // 다시 배치할 때는 이 기기의 지금 설정을 쓰고, 배치도가 기억하는 값도 그걸로 바꾼다.
-    // (앞 여유 공간이 다르면 읽기 전용이라 여기까지 오지 않는다. 달라질 수 있는 것은 간격뿐이다.)
-    const next = { gap: db.settings.gap, margin: db.settings.margin };
-    const changed = next.gap !== rules.gap || next.margin !== rules.margin;
-    const result = await runSolver(room, items, { shuffle: true, ...next });
+    // 이 배치도의 간격·앞 여유 공간으로 다시 배치한다.
+    // (기기 설정과 다르면 읽기 전용이라 여기까지 오지 않으므로, 기기 설정과 같은 값이다.)
+    const result = await runSolver(room, items, { shuffle: true, ...rules });
     arrangeBtn.disabled = false;
     if (!result || destroyed) return;
     snapshot();
-    rules = next;
     applyPlacements(items, result);
     refresh();
-    const message = resultMessage(result, items.length);
-    if (changed) message.text += ` 이 기기의 설정(간격 ${num(next.gap)}cm, 앞 여유 ${num(next.margin)}cm)으로 다시 배치했어요.`;
-    showBanner(message);
+    showBanner(resultMessage(result, items.length));
   }
 
   let bannerTimer = 0;
@@ -1199,7 +1198,7 @@ function renderSettings(page) {
       h('p', null, '가구를 쓰려면 앞에 서거나 앉을 자리가 필요해요. 자동 배치할 때 가구 앞(벽 반대쪽)으로 이만큼은 다른 가구가 들어오지 않게 비워 둬요. 0으로 두면 여유 없이 배치해요.'),
       cmStepper('margin', 5, '가구 앞 여유 공간'),
       h('p', { class: 'hint' }, '배치도에서 가구를 누르면 이 공간이 바닥에 옅게 표시돼요. 직접 끌어서 놓을 때는 막지 않으니 표시를 보고 조절하세요.'),
-      h('p', { class: 'hint' }, '간격과 여유 공간은 배치도를 만들 때의 값이 그 배치도에 함께 저장돼요. 그래서 설정을 바꾸거나 다른 기기에서 열어도 이미 만든 배치도는 그대로예요. 다만 앞 여유 공간이 지금 설정과 다른 배치도는 읽기 전용으로 열려서 볼 수만 있어요. 고치려면 설정을 맞추거나 배치도를 새로 만들어 주세요.'),
+      h('p', { class: 'hint' }, '간격과 여유 공간은 배치도를 만들 때의 값이 그 배치도에 함께 저장돼요. 그래서 설정을 바꾸거나 다른 기기에서 열어도 이미 만든 배치도는 그대로예요. 다만 간격이나 앞 여유 공간이 지금 설정과 다른 배치도는 읽기 전용으로 열려서 볼 수만 있어요. 고치려면 설정을 맞추거나 배치도를 새로 만들어 주세요.'),
     ),
     h('section', { class: 'panel' }, h('h2', null, '화면 모드'), h('div', { class: 'seg', role: 'group', 'aria-label': '화면 모드' }, themeButtons)),
     renderDataPanel(page),
