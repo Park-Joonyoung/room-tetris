@@ -3,9 +3,9 @@
 const KEY = 'room-tetris:v1';
 
 const DEFAULTS = {
-  furniture: [], // { id, name, w, d, h, color }
+  furniture: [], // { id, name, w, d, h, color, updatedAt }
   layouts: [], // { id, name, room:{w,d,h}, items:[{ id, fid, name, w, d, h, color, placed, x, z, rot }], createdAt, updatedAt }
-  settings: { gap: 5, theme: 'system' },
+  settings: { gap: 5, margin: 60, theme: 'system' }, // gap: 가구 사이 간격, margin: 가구 앞 여유 공간(cm)
 };
 
 function load() {
@@ -32,6 +32,37 @@ export function save() {
   } catch {
     return false;
   }
+}
+
+// 가져오기를 되돌릴 수 있도록 직전 상태를 한 벌 따로 보관한다.
+const BACKUP_KEY = 'room-tetris:backup';
+
+export function saveBackup() {
+  try {
+    localStorage.setItem(BACKUP_KEY, JSON.stringify({ at: Date.now(), furniture: db.furniture, layouts: db.layouts }));
+  } catch {
+    /* 저장 공간이 부족하면 되돌리기 없이 진행한다 */
+  }
+}
+
+/** @returns {{at:number, furniture:object[], layouts:object[]} | null} */
+export function readBackup() {
+  try {
+    const b = JSON.parse(localStorage.getItem(BACKUP_KEY) || 'null');
+    return b && Array.isArray(b.furniture) && Array.isArray(b.layouts) ? b : null;
+  } catch {
+    return null;
+  }
+}
+
+export function restoreBackup() {
+  const b = readBackup();
+  if (!b) return false;
+  db.furniture = b.furniture;
+  db.layouts = b.layouts;
+  if (!save()) return false;
+  localStorage.removeItem(BACKUP_KEY);
+  return true;
 }
 
 export function uid() {

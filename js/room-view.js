@@ -1,9 +1,9 @@
 // 배치도 3D 화면. Three.js 로 방(바닥 + 인접한 두 벽)과 가구(직육면체)를 그리고,
 // 시점 회전 / 확대·축소 / 가구 드래그 / 탭해서 이름 보기를 처리한다.
-// 데이터는 직접 바꾸지 않고 콜백(onMove, onStash, onRotate)으로 알려 준다.
+// 데이터는 직접 바꾸지 않고 콜백(onMove, onStash)으로 알려 준다.
 
 import * as THREE from 'three';
-import { footprint, rectOf, rectsOverlap, fittingRot, clamp } from './geom.js';
+import { footprint, rectOf, rectsOverlap, wallFor, clamp } from './geom.js';
 
 const DEG = Math.PI / 180;
 const DEFAULT_ELEVATION = 30 * DEG; // 맞은편 모서리의 살짝 위에서 내려다보는 각도
@@ -19,9 +19,9 @@ export class RoomView {
    * @param {HTMLElement} container
    * @param {{
    *   getGap?: () => number,
-   *   onMove?: (id: string, x: number, z: number, displaced: string[]) => void,
+   *   getMargin?: () => number,
+   *   onMove?: (id: string, x: number, z: number, rot: number, displaced: string[]) => void,
    *   onStash?: (id: string) => void,
-   *   onRotate?: (id: string) => void,
    *   isOverInventory?: (clientX: number, clientY: number) => boolean,
    *   onInventoryHover?: (over: boolean) => void,
    *   onPlainWheel?: () => void,
@@ -193,8 +193,21 @@ export class RoomView {
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat);
     edges.position.y = item.h / 2;
     group.add(box, edges);
+
+    // 가구 앞(벽 반대쪽) 여유 공간을 바닥에 옅게 표시한다. 벽 A 방향이면 +z, 벽 B 방향이면 +x 가 앞.
+    const margin = Math.max(0, this.cb.getMargin?.() ?? 0);
+    let zone = null;
+    if (margin > 0) {
+      const zoneMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3, depthWrite: false });
+      zone = new THREE.Mesh(new THREE.PlaneGeometry(item.rot ? margin : sx, item.rot ? sz : margin), zoneMat);
+      zone.rotation.x = -Math.PI / 2;
+      zone.position.set(item.rot ? sx / 2 + margin / 2 : 0, 0.6, item.rot ? 0 : sz / 2 + margin / 2);
+      zone.visible = ghost;
+      group.add(zone);
+    }
+
     group.position.set(item.x + sx / 2, 0, item.z + sz / 2);
-    group.userData = { box, edges, baseEdge: edgeMat.color.clone(), h: item.h };
+    group.userData = { box, edges, zone, baseEdge: edgeMat.color.clone(), h: item.h };
     return group;
   }
 
@@ -216,8 +229,9 @@ export class RoomView {
   /** 선택된 가구는 테두리를 진하게, 밀려날 가구는 반투명 + 빨간 테두리로 표시한다. */
   styleItems() {
     for (const [id, group] of this.groups) {
-      const { box, edges, baseEdge } = group.userData;
+      const { box, edges, zone, baseEdge } = group.userData;
       const displaced = this.marked.has(id);
+      if (zone) zone.visible = id === this.selectedId; // 고른 가구의 앞 여유 공간만 보여 준다
       box.material.transparent = displaced;
       box.material.opacity = displaced ? 0.3 : 1;
       box.material.needsUpdate = true;
@@ -408,10 +422,7 @@ export class RoomView {
     dims.textContent = `${num(item.w)} × ${num(item.d)} × ${num(item.h)} cm`;
     const actions = document.createElement('div');
     actions.className = 'tag-actions';
-    actions.append(
-      tagButton('회전', () => this.cb.onRotate?.(item.id)),
-      tagButton('인벤토리로', () => this.cb.onStash?.(item.id)),
-    );
+    actions.append(tagButton('인벤토리로', () => this.cb.onStash?.(item.id)));
     this.tag.append(name, dims, actions);
     this.tag.hidden = false;
   }
@@ -633,15 +644,17 @@ export class RoomView {
     const y = clamp(press.point.y, 0, item.h);
     this.dragPlane.set(UP, -y);
     const p = this.rayToPlane(press.x0, press.y0, this.dragPlane) || press.point;
+    const rot = item.rot ? 1 : 0;
     this.gesture = {
       type: 'drag',
       id: item.id,
+      item,
       sx,
       sz,
+      rot,
       offX: p.x - (item.x + sx / 2),
       offZ: p.z - (item.z + sz / 2),
-      startX: item.x,
-      startZ: item.z,
+      start: { x: item.x, z: item.z, sx, sz, rot },
       x: item.x,
       z: item.z,
       displaced: [],
@@ -657,11 +670,20 @@ export class RoomView {
     if (!group) return;
     const p = this.rayToPlane(clientX, clientY, this.dragPlane);
     if (p) {
-      const pos = this.snapPosition(g.id, p.x - g.offX - g.sx / 2, p.z - g.offZ - g.sz / 2, g.sx, g.sz);
-      g.x = pos.x;
-      g.z = pos.z;
+      const cx = p.x - g.offX;
+      const cz = p.z - g.offZ;
+      // 가구는 가까운 벽을 따라 선다(가로가 벽 쪽). 다른 벽 쪽으로 끌고 가면 그 벽에 맞춰 돌아선다.
+      const rot = wallFor(g.item, this.room, cx, cz, g.rot);
+      if (rot !== null) {
+        g.rot = rot;
+        ({ sx: g.sx, sz: g.sz } = footprint({ w: g.item.w, d: g.item.d, rot }));
+        const pos = this.snapPosition(g.id, cx - g.sx / 2, cz - g.sz / 2, g.sx, g.sz);
+        g.x = pos.x;
+        g.z = pos.z;
+      }
     }
     group.position.set(g.x + g.sx / 2, 0, g.z + g.sz / 2);
+    group.rotation.y = quarterTurn(g.start.rot, g.rot);
     const overInv = !!this.cb.isOverInventory?.(clientX, clientY);
     if (overInv !== g.overInv) {
       g.overInv = overInv;
@@ -674,13 +696,13 @@ export class RoomView {
 
   finishItemDrag(g, clientX, clientY) {
     const overInv = !!this.cb.isOverInventory?.(clientX, clientY);
-    const moved = Math.abs(g.x - g.startX) > 0.01 || Math.abs(g.z - g.startZ) > 0.01;
+    const moved = Math.abs(g.x - g.start.x) > 0.01 || Math.abs(g.z - g.start.z) > 0.01 || g.rot !== g.start.rot;
     if (overInv) {
       this.endDragVisuals(g, true);
       this.cb.onStash?.(g.id);
     } else if (moved) {
       this.endDragVisuals(g, false);
-      this.cb.onMove?.(g.id, g.x, g.z, g.displaced);
+      this.cb.onMove?.(g.id, g.x, g.z, g.rot, g.displaced);
     } else {
       this.endDragVisuals(g, true);
     }
@@ -691,7 +713,10 @@ export class RoomView {
     if (g.overInv) this.cb.onInventoryHover?.(false);
     this.markDisplaced([]);
     const group = this.groups.get(g.id);
-    if (restore && group) group.position.set(g.startX + g.sx / 2, 0, g.startZ + g.sz / 2);
+    if (restore && group) {
+      group.position.set(g.start.x + g.start.sx / 2, 0, g.start.z + g.start.sz / 2);
+      group.rotation.y = 0;
+    }
     this.invalidate();
   }
 
@@ -700,11 +725,8 @@ export class RoomView {
   /** @returns {boolean} 이 방에 놓을 수 있는 가구인지 */
   externalStart(item) {
     this.externalCancel();
-    const rot = fittingRot(item, this.room);
-    if (rot === null) return false;
-    const it = { ...item, rot, x: 0, z: 0 };
-    const { sx, sz } = footprint(it);
-    this.ext = { item: it, sx, sz, group: null, x: 0, z: 0, displaced: [], visible: false };
+    if (wallFor(item, this.room, 0, 0) === null) return false;
+    this.ext = { item, rot: null, builtRot: 0, sx: 0, sz: 0, group: null, x: 0, z: 0, displaced: [], visible: false };
     this.select(null);
     return true;
   }
@@ -724,18 +746,26 @@ export class RoomView {
     }
     const p = this.rayToPlane(clientX, clientY, this.floorPlane);
     if (p) {
-      const pos = this.snapPosition(null, p.x - e.sx / 2, p.z - e.sz / 2, e.sx, e.sz);
-      e.x = pos.x;
-      e.z = pos.z;
-      e.visible = true;
+      // 놓으려는 곳에서 가까운 벽을 따라 서도록 방향을 정한다.
+      const rot = wallFor(e.item, this.room, p.x, p.z, e.rot);
+      if (rot !== null) {
+        e.rot = rot;
+        ({ sx: e.sx, sz: e.sz } = footprint({ w: e.item.w, d: e.item.d, rot }));
+        const pos = this.snapPosition(null, p.x - e.sx / 2, p.z - e.sz / 2, e.sx, e.sz);
+        e.x = pos.x;
+        e.z = pos.z;
+        e.visible = true;
+      }
     }
     if (e.visible) {
       if (!e.group) {
-        e.group = this.makeItemGroup(e.item, true);
+        e.builtRot = e.rot;
+        e.group = this.makeItemGroup({ ...e.item, rot: e.rot, x: e.x, z: e.z }, true);
         this.scene.add(e.group);
       }
       e.group.visible = true;
       e.group.position.set(e.x + e.sx / 2, 0, e.z + e.sz / 2);
+      e.group.rotation.y = quarterTurn(e.builtRot, e.rot);
       e.displaced = this.overlapping(null, e.x, e.z, e.sx, e.sz);
       this.markDisplaced(e.displaced);
     }
@@ -747,7 +777,7 @@ export class RoomView {
   externalEnd(clientX, clientY) {
     const over = this.externalMove(clientX, clientY);
     const e = this.ext;
-    const result = e && over && e.visible ? { x: e.x, z: e.z, rot: e.item.rot, displaced: e.displaced } : null;
+    const result = e && over && e.visible ? { x: e.x, z: e.z, rot: e.rot, displaced: e.displaced } : null;
     this.externalCancel();
     return result;
   }
@@ -789,6 +819,12 @@ export class RoomView {
     this.dimW.remove();
     this.dimD.remove();
   }
+}
+
+/** 한쪽 벽 방향으로 만든 모형을 다른 벽 방향으로 보이게 하는 회전각(앞쪽이 +z ↔ +x 로 바뀌도록). */
+function quarterTurn(builtRot, rot) {
+  if (builtRot === rot) return 0;
+  return builtRot === 0 ? Math.PI / 2 : -Math.PI / 2;
 }
 
 function num(v) {

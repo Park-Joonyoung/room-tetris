@@ -1,8 +1,9 @@
 // 화면 구성: 가구 관리 / 배치도 관리 / 배치도 편집 / 설정
 
-import { db, save, uid, nextColor } from './store.js';
-import { solve } from './solver.js';
-import { footprint, rectOf, rectsOverlap, fittingRot, clamp, TOL } from './geom.js';
+import { db, save, uid, nextColor, saveBackup, readBackup, restoreBackup } from './store.js';
+import { solve, seededRandom } from './solver.js';
+import { rectOf, clamp } from './geom.js';
+import { TransferError, LINK_PARAM, LONG_LINK_CHARS, buildExport, planMerge, toFileText, fromFileText, encodePayload, decodePayload, makeLink, extractPayload } from './transfer.js';
 
 const app = document.getElementById('app');
 const overlayRoot = document.getElementById('overlay-root');
@@ -73,13 +74,17 @@ function persist() {
 }
 
 /** 모달(휴대폰에서는 아래에서 올라오는 시트). @returns {{close: () => void}} */
-function openModal({ title, body, footer, wide = false }) {
+function openModal({ title, body, footer, wide = false, stack = false, onDismiss = null }) {
   const close = () => {
     document.removeEventListener('keydown', onKey);
     backdrop.remove();
   };
+  const dismiss = () => {
+    close();
+    onDismiss?.();
+  };
   const onKey = (e) => {
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') dismiss();
   };
   const sheet = h(
     'div',
@@ -88,12 +93,12 @@ function openModal({ title, body, footer, wide = false }) {
       'header',
       { class: 'modal-head' },
       h('h2', null, title),
-      h('button', { class: 'icon-btn', type: 'button', 'aria-label': '닫기', onclick: close }, icon('close')),
+      h('button', { class: 'icon-btn', type: 'button', 'aria-label': '닫기', onclick: dismiss }, icon('close')),
     ),
     h('div', { class: 'modal-body' }, body),
-    footer ? h('footer', { class: 'modal-foot' }, footer) : null,
+    footer ? h('footer', { class: `modal-foot${stack ? ' stack' : ''}` }, footer) : null,
   );
-  const backdrop = h('div', { class: 'backdrop', onpointerdown: (e) => e.target === backdrop && close() }, sheet);
+  const backdrop = h('div', { class: 'backdrop', onpointerdown: (e) => e.target === backdrop && dismiss() }, sheet);
   overlayRoot.append(backdrop);
   document.addEventListener('keydown', onKey);
   const first = sheet.querySelector('input:not([type=color]):not([type=checkbox])');
@@ -167,7 +172,23 @@ const NAV = [
 ];
 
 function route() {
+  // 저장하지 않은 내용이 있는데 편집 화면을 벗어나려 하면(뒤로가기 포함),
+  // 일단 편집 화면 주소로 되돌려 놓고 나갈지 물어본다.
+  if (editor && !editor.leaving && editor.isDirty() && location.hash !== editor.hash) {
+    history.pushState(null, '', editor.hash);
+    editor.confirmLeave(() => history.back());
+    return;
+  }
+
+  // 가져오기 링크(#import=...)로 들어온 경우: 주소에서 데이터를 지우고 배치도 목록 위에 확인 창을 띄운다.
+  let importPayload = null;
+  if (location.hash.startsWith(`#${LINK_PARAM}`)) {
+    importPayload = location.hash.slice(1 + LINK_PARAM.length);
+    history.replaceState(null, '', '#/layouts');
+  }
+
   const [name, arg] = location.hash.replace(/^#\/?/, '').split('/');
+  activeSolve?.abandon();
   overlayRoot.replaceChildren();
   toastRoot.replaceChildren();
   if (editor) {
@@ -201,6 +222,7 @@ function route() {
   );
   ({ furniture: renderFurniture, layouts: renderLayouts, settings: renderSettings })[key](page);
   window.scrollTo(0, 0);
+  if (importPayload !== null) importFromPayload(importPayload);
 }
 
 // ───────────────────────── 가구 관리 ─────────────────────────
@@ -263,8 +285,9 @@ function openFurnitureForm(existing, onDone) {
         name.classList.toggle('invalid', !nm);
         const d = readDims(dims);
         if (!nm || !d) return toast('이름과 크기(0보다 큰 숫자)를 확인해 주세요.');
-        if (existing) Object.assign(existing, { name: nm, ...d, color: color.value });
-        else db.furniture.push({ id: uid(), name: nm, ...d, color: color.value });
+        const updatedAt = Date.now(); // 다른 기기와 합칠 때 어느 쪽이 최신인지 판단하는 기준
+        if (existing) Object.assign(existing, { name: nm, ...d, color: color.value, updatedAt });
+        else db.furniture.push({ id: uid(), name: nm, ...d, color: color.value, updatedAt });
         persist();
         modal.close();
         onDone();
@@ -444,15 +467,11 @@ function wizardFurnitureStep(draft) {
     draft.selected = new Set(on ? db.furniture.map((f) => f.id) : []);
     sync();
   };
-  create.addEventListener('click', () => {
-    create.disabled = true;
-    create.textContent = '배치 계산 중…';
-    // 버튼 문구가 먼저 그려지도록 한 박자 쉬고 계산한다.
-    setTimeout(() => {
-      const layout = createLayout(draft);
-      modal.close();
-      location.hash = `#/layout/${layout.id}`;
-    }, 40);
+  create.addEventListener('click', async () => {
+    modal.close();
+    const layout = await createLayout(draft);
+    if (layout) location.hash = `#/layout/${layout.id}`;
+    else wizardFurnitureStep(draft); // 계산을 취소하면 가구 선택으로 돌아온다
   });
   sync();
   modal = openModal({
@@ -477,49 +496,143 @@ function wizardFurnitureStep(draft) {
   });
 }
 
-function createLayout(draft) {
+async function createLayout(draft) {
+  const room = { w: draft.w, d: draft.d, h: draft.h };
+  const items = db.furniture
+    .filter((f) => draft.selected.has(f.id))
+    .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0 }));
+  const result = await runSolver(room, items);
+  if (!result) return null; // 사용자가 취소함
+  applyPlacements(items, result);
   const now = Date.now();
-  const layout = {
-    id: uid(),
-    name: draft.name,
-    room: { w: draft.w, d: draft.d, h: draft.h },
-    items: db.furniture
-      .filter((f) => draft.selected.has(f.id))
-      .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0 })),
-    createdAt: now,
-    updatedAt: now,
-  };
-  const result = autoArrange(layout);
+  const layout = { id: uid(), name: draft.name, room, items, createdAt: now, updatedAt: now };
   db.layouts.unshift(layout);
   persist();
-  pendingNotice = { id: layout.id, placed: result.placements.length, total: layout.items.length };
+  pendingNotice = { id: layout.id, message: resultMessage(result, items.length) };
   return layout;
 }
 
-/** 배치도의 모든 가구를 두 벽면에 다시 자동 배치한다. 못 놓은 가구는 인벤토리로. */
-function autoArrange(layout, random = null) {
-  const result = solve(
-    layout.room,
-    layout.items.map(({ id, w, d, h: height }) => ({ id, w, d, h: height })),
-    db.settings.gap,
-    { random },
-  );
+/** 자동 배치 결과를 가구 목록에 반영한다. 못 놓은 가구는 인벤토리로. */
+function applyPlacements(items, result) {
   const byId = new Map(result.placements.map((p) => [p.id, p]));
-  for (const it of layout.items) {
+  for (const it of items) {
     const p = byId.get(it.id);
     if (p) Object.assign(it, { placed: true, x: p.x, z: p.z, rot: p.rot });
     else it.placed = false;
   }
-  return result;
 }
 
-function resultMessage(placed, total) {
+function resultMessage(result, total) {
+  const placed = result.placements.length;
   if (total === 0) return { ok: true, text: '가구 없이 빈 방으로 만들었어요.' };
   if (placed === total) return { ok: true, text: `가구 ${total}개를 모두 배치했어요.` };
-  return {
-    ok: false,
-    text: `배치 불가능: 선택한 가구를 두 벽면에 모두 놓을 수 없어요. ${total}개 중 ${placed}개만 배치하고, 남은 ${total - placed}개는 인벤토리에 두었어요.`,
+  const rest = `${total}개 중 ${placed}개만 배치하고, 남은 ${total - placed}개는 인벤토리에 두었어요.`;
+  // 시간이 다 됐거나 중간에 멈춘 경우에는 "불가능"이라고 단정할 수 없다.
+  if (result.timedOut) return { ok: false, text: `제한 시간 안에 모두 놓는 방법을 찾지 못했어요. ${rest}` };
+  return { ok: false, text: `배치 불가능: 선택한 가구를 두 벽면에 모두 놓을 수 없어요. ${rest}` };
+}
+
+// ───────────────────────── 자동 배치 계산 ─────────────────────────
+// 계산은 백그라운드(Web Worker)에서 돌린다. 최대 30초까지 더 좋은 배치를 찾고,
+// 그동안 화면은 멈추지 않아서 취소하거나 뒤로 갈 수 있다.
+
+const SOLVE_LIMIT_MS = 30000;
+let activeSolve = null;
+
+/**
+ * @returns {Promise<object|null>} 배치 결과. 사용자가 취소하면 null.
+ *   화면을 떠나서 중단된 경우에는 끝나지 않는다(이어서 할 일이 없으므로).
+ */
+function runSolver(room, items, { shuffle = false } = {}) {
+  const job = {
+    room,
+    items: items.map(({ id, w, d, h: height }) => ({ id, w, d, h: height })),
+    gap: db.settings.gap,
+    margin: db.settings.margin,
+    timeLimitMs: SOLVE_LIMIT_MS,
+    seed: shuffle ? Math.floor(Math.random() * 0xffffffff) : null,
   };
+  const total = items.length;
+
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let worker = null;
+    let latest = null; // 지금까지 찾은 가장 좋은 배치
+    let modal = null;
+    let settled = false;
+    let showTimer = 0;
+    let tick = 0;
+
+    const status = h('p', { class: 'solve-status' }, '가구를 놓을 방법을 찾고 있어요…');
+    const clock = h('small', { class: 'solve-clock' });
+    const bar = h('i', null);
+    const useNow = h('button', { class: 'btn primary', type: 'button', disabled: true, onclick: () => finish(latest && { ...latest, timedOut: true }) }, '지금 결과 사용');
+
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(showTimer);
+      clearInterval(tick);
+      worker?.terminate();
+      modal?.close();
+      activeSolve = null;
+    };
+    const finish = (result) => {
+      if (settled) return;
+      cleanup();
+      resolve(result);
+    };
+    const update = () => {
+      const sec = Math.min(SOLVE_LIMIT_MS, Date.now() - started) / 1000;
+      clock.textContent = `${Math.floor(sec)}초 / 최대 ${SOLVE_LIMIT_MS / 1000}초`;
+      bar.style.width = `${(sec / (SOLVE_LIMIT_MS / 1000)) * 100}%`;
+      if (latest) {
+        status.textContent = `지금까지 ${total}개 중 ${latest.placements.length}개를 놓는 방법을 찾았어요. 더 좋은 방법을 찾는 중…`;
+        useNow.disabled = false;
+      }
+    };
+    const showProgress = () => {
+      if (settled) return;
+      modal = openModal({
+        title: '자동 배치 중',
+        body: h('div', { class: 'solve' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), status, h('div', { class: 'solve-bar' }, bar), clock),
+        footer: [h('button', { class: 'btn', type: 'button', onclick: () => finish(null) }, '취소'), useNow],
+        onDismiss: () => finish(null),
+      });
+      update();
+      tick = setInterval(update, 250);
+    };
+    // 워커를 쓸 수 없는 브라우저에서는 화면이 멈추므로 짧게만 계산한다.
+    const fallback = () => {
+      worker?.terminate();
+      worker = null;
+      setTimeout(() => {
+        if (settled) return;
+        const random = job.seed == null ? null : seededRandom(job.seed);
+        finish(solve(job.room, job.items, job.gap, { margin: job.margin, timeLimitMs: 3000, random }));
+      }, 30);
+    };
+
+    activeSolve = { abandon: cleanup };
+    try {
+      worker = new Worker(new URL('./solver-worker.js', import.meta.url), { type: 'module' });
+    } catch {
+      return fallback();
+    }
+    worker.onmessage = (e) => {
+      if (e.data.type === 'progress') {
+        latest = e.data.result;
+        if (modal) update();
+      } else {
+        finish(e.data.result);
+      }
+    };
+    worker.onerror = (e) => {
+      e.preventDefault?.();
+      if (!settled) fallback();
+    };
+    worker.postMessage(job);
+    showTimer = setTimeout(showProgress, 400); // 금방 끝나는 계산에는 창을 띄우지 않는다
+  });
 }
 
 // ───────────────────────── 배치도 편집 ─────────────────────────
@@ -527,9 +640,16 @@ function resultMessage(placed, total) {
 async function openEditor(layout) {
   document.body.classList.add('editing');
   const { room } = layout;
+  const hash = `#/layout/${layout.id}`;
+  // 편집은 작업본에서 하고, 저장하기를 눌러야 실제 배치도에 반영된다.
+  let items = structuredClone(layout.items);
+  let savedJson = JSON.stringify(layout.items);
   const history = [];
   let view = null;
   let destroyed = false;
+  let leaveModal = null;
+
+  const isDirty = () => JSON.stringify(items) !== savedJson;
 
   const stage = h('div', { class: 'ed-stage' });
   const banner = h('div', { class: 'ed-banner', hidden: true });
@@ -538,6 +658,21 @@ async function openEditor(layout) {
   const inventory = h('aside', { class: 'ed-inv' }, h('div', { class: 'inv-head' }, h('b', null, '인벤토리'), invCount, h('small', null, '끌어서 방에 놓기')), invList);
   const undoBtn = h('button', { class: 'tool', type: 'button', disabled: true, title: '되돌리기', 'aria-label': '되돌리기', onclick: () => undo() }, icon('undo'), h('span', null, '되돌리기'));
   const arrangeBtn = h('button', { class: 'tool', type: 'button', title: '가구를 두 벽면에 다시 자동 배치', 'aria-label': '자동 배치', onclick: () => rearrange() }, icon('shuffle'), h('span', null, '자동 배치'));
+  const saveBtn = h('button', { class: 'tool save', type: 'button', disabled: true, title: '변경한 배치를 저장', onclick: () => save() }, icon('check'), h('span', null, '저장하기'));
+  const backBtn = h(
+    'a',
+    {
+      class: 'icon-btn',
+      href: '#/layouts',
+      'aria-label': '배치도 목록으로',
+      onclick: (e) => {
+        if (!isDirty()) return;
+        e.preventDefault();
+        confirmLeave(() => (location.hash = '#/layouts'));
+      },
+    },
+    icon('back'),
+  );
   const touch = matchMedia('(pointer: coarse)').matches;
   const hint = h(
     'p',
@@ -552,13 +687,7 @@ async function openEditor(layout) {
     h(
       'div',
       { class: 'editor' },
-      h(
-        'header',
-        { class: 'ed-bar' },
-        h('a', { class: 'icon-btn', href: '#/layouts', 'aria-label': '배치도 목록으로' }, icon('back')),
-        h('div', { class: 'ed-title' }, h('b', null, layout.name), h('small', null, dimsText(room))),
-        h('div', { class: 'ed-tools' }, undoBtn, arrangeBtn),
-      ),
+      h('header', { class: 'ed-bar' }, backBtn, h('div', { class: 'ed-title' }, h('b', null, layout.name), h('small', null, dimsText(room))), h('div', { class: 'ed-tools' }, undoBtn, arrangeBtn, saveBtn)),
       h(
         'div',
         { class: 'ed-main' },
@@ -577,25 +706,40 @@ async function openEditor(layout) {
     ),
   );
 
+  // 탭을 닫거나 새로고침할 때도 저장하지 않은 내용이 있으면 브라우저가 한 번 물어본다.
+  const onBeforeUnload = (e) => {
+    if (!isDirty()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
+
   editor = {
     view: null,
+    hash,
+    leaving: false,
+    isDirty,
+    confirmLeave,
     destroy() {
       destroyed = true;
+      window.removeEventListener('beforeunload', onBeforeUnload);
       view?.dispose();
     },
   };
 
-  const item = (id) => layout.items.find((it) => it.id === id);
+  const item = (id) => items.find((it) => it.id === id);
   const snapshot = () => {
-    history.push(JSON.stringify(layout.items));
+    history.push(JSON.stringify(items));
     if (history.length > 60) history.shift();
   };
-  const commit = () => {
-    layout.updatedAt = Date.now();
-    persist();
-    view?.setItems(layout.items);
+  /** 작업본이 바뀐 뒤 화면을 맞춘다. 저장은 하지 않고 저장하기 버튼만 켠다. */
+  const refresh = () => {
+    view?.setItems(items);
     renderInventory();
     undoBtn.disabled = history.length === 0;
+    const dirty = isDirty();
+    saveBtn.disabled = !dirty;
+    saveBtn.classList.toggle('dirty', dirty);
   };
   const stash = (ids) => {
     for (const id of ids) {
@@ -609,23 +753,57 @@ async function openEditor(layout) {
     toast(`${names.join(', ')}을(를) 인벤토리로 옮겼어요.`);
   };
 
+  function save() {
+    if (!isDirty()) return;
+    layout.items = structuredClone(items);
+    layout.updatedAt = Date.now();
+    savedJson = JSON.stringify(items);
+    persist();
+    refresh();
+    toast('배치도를 저장했어요.');
+  }
+
+  /** 저장하지 않은 내용이 있을 때 나가려 하면 물어본다. go 는 실제로 나가는 동작. */
+  function confirmLeave(go) {
+    if (leaveModal) return;
+    const done = (action) => {
+      leaveModal.close();
+      leaveModal = null;
+      if (!action) return;
+      if (action === 'save') save();
+      editor.leaving = true;
+      go();
+    };
+    leaveModal = openModal({
+      title: '저장하지 않은 내용이 있어요',
+      body: h('p', { class: 'modal-text' }, '바꾼 배치가 아직 저장되지 않았어요. 저장하지 않고 나갈까요?'),
+      stack: true,
+      footer: [
+        h('button', { class: 'btn primary', type: 'button', onclick: () => done('save') }, '저장하고 나가기'),
+        h('button', { class: 'btn danger', type: 'button', onclick: () => done('discard') }, '저장하지 않고 나가기'),
+        h('button', { class: 'btn', type: 'button', onclick: () => done(null) }, '계속 편집'),
+      ],
+      onDismiss: () => (leaveModal = null),
+    });
+  }
+
   function undo() {
     const prev = history.pop();
     if (!prev) return;
-    layout.items = JSON.parse(prev);
-    commit();
+    items = JSON.parse(prev);
+    refresh();
   }
 
-  function rearrange() {
-    if (!layout.items.length) return toast('배치할 가구가 없어요.');
+  async function rearrange() {
+    if (!items.length) return toast('배치할 가구가 없어요.');
     arrangeBtn.disabled = true;
-    setTimeout(() => {
-      snapshot();
-      const result = autoArrange(layout, Math.random);
-      commit();
-      arrangeBtn.disabled = false;
-      showBanner(resultMessage(result.placements.length, layout.items.length));
-    }, 30);
+    const result = await runSolver(room, items, { shuffle: true });
+    arrangeBtn.disabled = false;
+    if (!result || destroyed) return;
+    snapshot();
+    applyPlacements(items, result);
+    refresh();
+    showBanner(resultMessage(result, items.length));
   }
 
   let bannerTimer = 0;
@@ -638,7 +816,7 @@ async function openEditor(layout) {
   }
 
   function renderInventory() {
-    const stored = layout.items.filter((it) => !it.placed);
+    const stored = items.filter((it) => !it.placed);
     invCount.textContent = String(stored.length);
     invList.replaceChildren(
       ...(stored.length
@@ -705,7 +883,7 @@ async function openEditor(layout) {
       Object.assign(it, { placed: true, x: res.x, z: res.z, rot: res.rot });
       stash(res.displaced);
       displacedToast(res.displaced);
-      commit();
+      refresh();
       view.select(it.id);
     };
     chip.addEventListener('pointerup', (e) => end(e, false));
@@ -725,6 +903,7 @@ async function openEditor(layout) {
     if (destroyed) return;
     view = new RoomView(stage, {
       getGap: () => db.settings.gap,
+      getMargin: () => db.settings.margin,
       onInteract: () => hint.classList.add('gone'),
       onPlainWheel() {
         if (Date.now() - wheelHintAt < 4000) return;
@@ -733,40 +912,20 @@ async function openEditor(layout) {
       },
       isOverInventory: overInventory,
       onInventoryHover: (over) => inventory.classList.toggle('drop-target', over),
-      onMove(id, x, z, displaced) {
+      onMove(id, x, z, rot, displaced) {
         const it = item(id);
         if (!it) return;
         snapshot();
-        it.x = x;
-        it.z = z;
+        Object.assign(it, { x, z, rot });
         stash(displaced); // 옮긴 자리에 원래 있던 가구는 인벤토리로
         displacedToast(displaced);
-        commit();
+        refresh();
       },
       onStash(id) {
         if (!item(id)) return;
         snapshot();
         stash([id]);
-        commit();
-      },
-      onRotate(id) {
-        const it = item(id);
-        if (!it) return;
-        const cur = footprint(it);
-        const next = footprint({ ...it, rot: it.rot ? 0 : 1 });
-        if (next.sx > room.w + TOL || next.sz > room.d + TOL) return toast('돌리면 방에 들어가지 않아요.');
-        // 가운데를 기준으로 돌리되, 벽에 붙어 있던 면은 그대로 붙여 둔다.
-        let x = it.x <= TOL ? 0 : it.x + cur.sx / 2 - next.sx / 2;
-        let z = it.z <= TOL ? 0 : it.z + cur.sz / 2 - next.sz / 2;
-        x = Math.round(clamp(x, 0, room.w - next.sx) * 10) / 10;
-        z = Math.round(clamp(z, 0, room.d - next.sz) * 10) / 10;
-        snapshot();
-        Object.assign(it, { rot: it.rot ? 0 : 1, x, z });
-        const rect = rectOf(it);
-        const displaced = layout.items.filter((o) => o.placed && o.id !== id && rectsOverlap(rect, rectOf(o))).map((o) => o.id);
-        stash(displaced);
-        displacedToast(displaced);
-        commit();
+        refresh();
       },
     });
   } catch (err) {
@@ -776,37 +935,186 @@ async function openEditor(layout) {
   }
   editor.view = view;
   view.setRoom(room);
-  view.setItems(layout.items);
+  view.setItems(items);
 
-  if (pendingNotice && pendingNotice.id === layout.id) {
-    showBanner(resultMessage(pendingNotice.placed, pendingNotice.total));
-  }
+  if (pendingNotice && pendingNotice.id === layout.id) showBanner(pendingNotice.message);
   pendingNotice = null;
+}
+
+// ───────────────────────── 내보내기 / 가져오기 ─────────────────────────
+
+function showMessage(title, text) {
+  let modal;
+  modal = openModal({
+    title,
+    body: h('p', { class: 'modal-text' }, text),
+    footer: [h('button', { class: 'btn primary', type: 'button', onclick: () => modal.close() }, '확인')],
+  });
+}
+
+function importFailed(err) {
+  if (!(err instanceof TransferError)) console.error(err);
+  showMessage('가져올 수 없어요', err instanceof TransferError ? err.message : '데이터를 읽는 중 문제가 생겼어요.');
+}
+
+async function importFromPayload(payload) {
+  try {
+    confirmImport(await decodePayload(payload));
+  } catch (err) {
+    importFailed(err);
+  }
+}
+
+/** 가져올 내용과 합친 결과를 미리 보여 주고, 확인하면 합친다. */
+function confirmImport(data) {
+  if (!data.furniture.length && !data.layouts.length) return showMessage('가져올 내용이 없어요', '비어 있는 데이터예요.');
+  const plan = planMerge(db, data);
+  const { furniture: f, layouts: l, changes } = plan.summary;
+  if (changes === 0) {
+    return showMessage('새로 가져올 내용이 없어요', '들어 있는 가구와 배치도가 이미 이 기기에 있고, 이 기기의 내용이 같거나 더 최신이에요.');
+  }
+  const row = (label, a, b) => (a || b ? h('li', null, h('span', null, label), h('b', null, [a ? `가구 ${a}개` : null, b ? `배치도 ${b}개` : null].filter(Boolean).join(' · '))) : null);
+  let modal;
+  modal = openModal({
+    title: '데이터 가져오기',
+    body: h(
+      'div',
+      { class: 'form' },
+      h('p', { class: 'modal-text' }, `가구 ${data.furniture.length}개, 배치도 ${data.layouts.length}개가 들어 있어요. 이 기기의 데이터와 합칠까요?`),
+      h('ul', { class: 'merge-list' }, row('새로 추가', f.added, l.added), row('더 최신 내용으로 바꿈', f.updated, l.updated), row('그대로 둠', f.unchanged, l.unchanged)),
+      h('p', { class: 'hint' }, '이 기기에 있던 가구와 배치도는 지워지지 않아요. 가져온 뒤에도 설정에서 되돌릴 수 있어요.'),
+    ),
+    footer: [
+      h('button', { class: 'btn', type: 'button', onclick: () => modal.close() }, '취소'),
+      h(
+        'button',
+        {
+          class: 'btn primary',
+          type: 'button',
+          onclick: () => {
+            modal.close();
+            saveBackup(); // 가져오기 직전 상태를 보관해 두어 되돌릴 수 있게 한다
+            db.furniture = plan.furniture;
+            db.layouts = plan.layouts;
+            persist();
+            route();
+            toast(`가져왔어요. 가구 ${f.added + f.updated}개, 배치도 ${l.added + l.updated}개가 반영됐어요.`);
+          },
+        },
+        '합치기',
+      ),
+    ],
+  });
+}
+
+function downloadFile(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const a = h('a', { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function hasData() {
+  if (db.furniture.length || db.layouts.length) return true;
+  toast('내보낼 가구나 배치도가 아직 없어요.');
+  return false;
+}
+
+function exportFile() {
+  if (!hasData()) return;
+  const d = new Date();
+  const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  downloadFile(`room-tetris-${stamp}.json`, toFileText(buildExport(db)));
+  toast('파일로 저장했어요. 다른 기기로 옮긴 뒤 설정에서 가져오세요.');
+}
+
+async function exportLink() {
+  return makeLink(location.href, await encodePayload(buildExport(db)));
+}
+
+/** 복사가 막힌 브라우저에서는 링크를 직접 보여 준다. */
+function showLink(link, note) {
+  const box = h('textarea', { class: 'input link-box', readOnly: true, rows: 4, value: link, onfocus: () => box.select() });
+  let modal;
+  modal = openModal({
+    title: '내보내기 링크',
+    body: h('div', { class: 'form' }, h('p', { class: 'modal-text' }, note), box),
+    footer: [h('button', { class: 'btn primary', type: 'button', onclick: () => modal.close() }, '닫기')],
+  });
+}
+
+const LONG_LINK_NOTE = '데이터가 많아서 링크가 길어요. 메신저에 따라 링크가 잘릴 수 있으니, 잘 안 되면 파일로 저장해서 옮겨 주세요.';
+
+async function copyLink() {
+  if (!hasData()) return;
+  try {
+    const link = await exportLink();
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      return showLink(link, '아래 링크를 길게 눌러 복사한 뒤 다른 기기로 보내 주세요.');
+    }
+    if (link.length > LONG_LINK_CHARS) showMessage('링크를 복사했어요', LONG_LINK_NOTE);
+    else toast('링크를 복사했어요. 다른 기기로 보내서 열어 주세요.');
+  } catch (err) {
+    importFailed(err);
+  }
+}
+
+async function shareLink() {
+  if (!hasData()) return;
+  try {
+    const link = await exportLink();
+    await navigator.share({ title: '룸 테트리스 데이터', url: link });
+  } catch (err) {
+    if (err?.name !== 'AbortError') toast('공유하지 못했어요. 링크 복사를 이용해 주세요.');
+  }
+}
+
+async function importFile(file) {
+  try {
+    if (file.size > 5 * 1024 * 1024) throw new TransferError('파일이 너무 커요.');
+    confirmImport(fromFileText(await file.text()));
+  } catch (err) {
+    importFailed(err);
+  }
 }
 
 // ───────────────────────── 설정 ─────────────────────────
 
-function renderSettings(page) {
-  const gap = h('input', { type: 'text', inputMode: 'decimal', class: 'input', value: num(db.settings.gap), autocomplete: 'off', 'aria-label': '가구 사이 간격(cm)' });
-  const setGap = (v) => {
+/** 설정의 숫자 항목(cm): 직접 입력 + 줄이기/늘리기 버튼 */
+function cmStepper(key, step, name) {
+  const input = h('input', { type: 'text', inputMode: 'decimal', class: 'input', value: num(db.settings[key]), autocomplete: 'off', 'aria-label': `${name}(cm)` });
+  const set = (v) => {
     if (!(v >= 0 && v <= 300)) {
-      gap.classList.add('invalid');
+      input.classList.add('invalid');
       return;
     }
-    gap.classList.remove('invalid');
-    db.settings.gap = Math.round(v * 10) / 10;
+    input.classList.remove('invalid');
+    db.settings[key] = Math.round(v * 10) / 10;
     persist();
   };
-  gap.addEventListener('input', () => setGap(parseCm(gap.value)));
-  gap.addEventListener('blur', () => {
-    gap.value = num(db.settings.gap);
-    gap.classList.remove('invalid');
+  input.addEventListener('input', () => set(parseCm(input.value)));
+  input.addEventListener('blur', () => {
+    input.value = num(db.settings[key]);
+    input.classList.remove('invalid');
   });
-  const step = (delta) => {
-    setGap(clamp(db.settings.gap + delta, 0, 300));
-    gap.value = num(db.settings.gap);
+  const bump = (delta) => {
+    set(clamp(db.settings[key] + delta, 0, 300));
+    input.value = num(db.settings[key]);
   };
+  return h(
+    'div',
+    { class: 'stepper' },
+    h('button', { class: 'icon-btn', type: 'button', 'aria-label': `${name} 줄이기`, onclick: () => bump(-step) }, icon('minus')),
+    h('span', { class: 'field-box' }, input, h('em', null, 'cm')),
+    h('button', { class: 'icon-btn', type: 'button', 'aria-label': `${name} 늘리기`, onclick: () => bump(step) }, icon('plus')),
+  );
+}
 
+function renderSettings(page) {
   const themes = [
     { key: 'system', label: '시스템 설정' },
     { key: 'light', label: '라이트' },
@@ -837,17 +1145,91 @@ function renderSettings(page) {
       { class: 'panel' },
       h('h2', null, '가구 사이 간격'),
       h('p', null, '자동 배치할 때 가구와 가구 사이를 이만큼 띄워요. 배치도에서 가구를 끌어다 놓을 때도 이 간격에 맞춰 달라붙어요.'),
-      h(
-        'div',
-        { class: 'stepper' },
-        h('button', { class: 'icon-btn', type: 'button', 'aria-label': '간격 줄이기', onclick: () => step(-1) }, icon('minus')),
-        h('span', { class: 'field-box' }, gap, h('em', null, 'cm')),
-        h('button', { class: 'icon-btn', type: 'button', 'aria-label': '간격 늘리기', onclick: () => step(1) }, icon('plus')),
-      ),
-      h('p', { class: 'hint' }, '바꾼 간격은 다음 자동 배치부터 적용돼요. 이미 만든 배치도는 편집 화면의 자동 배치를 누르면 새 간격으로 다시 배치돼요.'),
+      cmStepper('gap', 1, '가구 사이 간격'),
+    ),
+    h(
+      'section',
+      { class: 'panel' },
+      h('h2', null, '가구 앞 여유 공간'),
+      h('p', null, '가구를 쓰려면 앞에 서거나 앉을 자리가 필요해요. 자동 배치할 때 가구 앞(벽 반대쪽)으로 이만큼은 다른 가구가 들어오지 않게 비워 둬요. 0으로 두면 여유 없이 배치해요.'),
+      cmStepper('margin', 5, '가구 앞 여유 공간'),
+      h('p', { class: 'hint' }, '배치도에서 가구를 누르면 이 공간이 바닥에 옅게 표시돼요. 직접 끌어서 놓을 때는 막지 않으니 표시를 보고 조절하세요.'),
+      h('p', { class: 'hint' }, '간격과 여유 공간을 바꾸면 다음 자동 배치부터 적용돼요. 이미 만든 배치도는 편집 화면에서 자동 배치를 누르면 새 값으로 다시 배치돼요.'),
     ),
     h('section', { class: 'panel' }, h('h2', null, '화면 모드'), h('div', { class: 'seg', role: 'group', 'aria-label': '화면 모드' }, themeButtons)),
-    h('section', { class: 'panel' }, h('h2', null, '데이터'), h('p', null, '가구와 배치도는 이 기기의 브라우저에만 저장돼요. 다른 기기나 다른 브라우저와는 공유되지 않아요.')),
+    renderDataPanel(page),
+  );
+}
+
+function renderDataPanel(page) {
+  const fileInput = h('input', {
+    type: 'file',
+    accept: '.json,application/json',
+    hidden: true,
+    onchange: () => {
+      const file = fileInput.files?.[0];
+      fileInput.value = '';
+      if (file) importFile(file);
+    },
+  });
+  const paste = h('input', { type: 'text', class: 'input', placeholder: '받은 링크 붙여넣기', autocomplete: 'off', autocapitalize: 'off', spellcheck: false, 'aria-label': '가져오기 링크' });
+  const importPasted = () => {
+    const payload = extractPayload(paste.value);
+    if (!payload) {
+      paste.classList.add('invalid');
+      return toast('가져오기 링크가 아니에요. 링크 전체를 붙여넣어 주세요.');
+    }
+    paste.classList.remove('invalid');
+    paste.value = '';
+    importFromPayload(payload);
+  };
+  paste.addEventListener('keydown', (e) => e.key === 'Enter' && importPasted());
+
+  const backup = readBackup();
+  const when = backup ? new Date(backup.at).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+
+  return h(
+    'section',
+    { class: 'panel' },
+    fileInput,
+    h('h2', null, '데이터 옮기기'),
+    h('p', null, '가구와 배치도는 이 기기의 브라우저에만 저장돼요. 다른 기기에서도 쓰려면 여기서 내보낸 뒤 그 기기에서 가져오세요.'),
+    h('h3', null, '내보내기', h('small', null, `가구 ${db.furniture.length}개 · 배치도 ${db.layouts.length}개`)),
+    h(
+      'div',
+      { class: 'btn-row' },
+      h('button', { class: 'btn', type: 'button', onclick: exportFile }, '파일로 저장'),
+      h('button', { class: 'btn', type: 'button', onclick: copyLink }, '링크 복사'),
+      typeof navigator.share === 'function' ? h('button', { class: 'btn', type: 'button', onclick: shareLink }, '링크 공유') : null,
+    ),
+    h('h3', null, '가져오기'),
+    h('div', { class: 'btn-row' }, h('button', { class: 'btn', type: 'button', onclick: () => fileInput.click() }, '파일 선택')),
+    h('div', { class: 'paste-row' }, paste, h('button', { class: 'btn', type: 'button', onclick: importPasted }, '가져오기')),
+    h(
+      'p',
+      { class: 'hint' },
+      '가져온 내용은 지금 데이터에 합쳐져요. 없는 것은 추가되고, 같은 항목은 더 최근에 고친 쪽이 남아요. 받은 링크를 그냥 눌러도 가져오기 창이 열리지만, 카카오톡 같은 앱 안에서 열린 화면은 저장 공간이 따로라서 평소 쓰는 브라우저에 링크를 붙여넣는 쪽이 확실해요.',
+    ),
+    backup
+      ? h(
+          'div',
+          { class: 'btn-row' },
+          h(
+            'button',
+            {
+              class: 'btn',
+              type: 'button',
+              onclick: async () => {
+                if (!(await confirmDialog('마지막 가져오기 되돌리기', `${when}에 가져오기 직전 상태로 되돌려요. 그 뒤에 바꾼 내용은 사라져요.`, '되돌리기'))) return;
+                if (restoreBackup()) toast('가져오기 전 상태로 되돌렸어요.');
+                else toast('되돌리지 못했어요.');
+                renderSettings(page);
+              },
+            },
+            '마지막 가져오기 되돌리기',
+          ),
+        )
+      : null,
   );
 }
 

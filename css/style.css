@@ -485,6 +485,122 @@ a {
   background: var(--surface);
 }
 
+.panel h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 18px 0 0;
+  font-size: 15px;
+}
+
+.panel h3 small {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.paste-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.paste-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.panel .hint {
+  margin-top: 10px;
+  font-size: 13.5px;
+}
+
+.link-box {
+  height: auto;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-all;
+  resize: none;
+}
+
+.merge-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  list-style: none;
+  font-size: 14.5px;
+}
+
+.merge-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.merge-list span {
+  color: var(--muted);
+}
+
+/* 자동 배치 진행 창 */
+.solve {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 10px 0 4px;
+  text-align: center;
+}
+
+.spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.solve-status {
+  min-height: 3em;
+}
+
+.solve-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.solve-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s linear;
+}
+
+.solve-clock {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .seg {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -673,6 +789,10 @@ a {
 
 .modal-foot .btn {
   flex: 1;
+}
+
+.modal-foot.stack {
+  flex-direction: column;
 }
 
 @media (min-width: 620px) {
@@ -900,12 +1020,28 @@ body.editing #toast-root {
   height: 18px;
 }
 
+/* 저장하기: 바뀐 내용이 있을 때만 켜지고 눈에 띄게 */
+.tool.save.dirty {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.tool.save.dirty:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+
 @media (max-width: 480px) {
   .tool {
     padding: 0 10px;
   }
 
-  .tool span:not(.icon) {
+  .tool:not(.save) span:not(.icon) {
+    display: none;
+  }
+
+  .tool.save .icon {
     display: none;
   }
 }
