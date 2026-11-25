@@ -50,6 +50,11 @@ function coord(v) {
   return Math.min(Math.max(Math.round(v * 1000) / 1000, 0), MAX_CM);
 }
 
+/** 배치도에 기록된 간격·앞 여유 공간(cm). 없거나 이상하면 undefined(받는 기기의 설정을 쓰게 된다). */
+function rule(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 300 ? Math.round(v * 10) / 10 : undefined;
+}
+
 const time = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
 const color = (v) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : '#888888');
 
@@ -101,7 +106,7 @@ export function parseImport(raw) {
       };
     });
     const createdAt = time(l.createdAt);
-    return {
+    const out = {
       id: str(l.id, 64, '배치도 id'),
       name: str(l.name, 30, '방 이름'),
       room: { w: size(l.room.w, '방 가로'), d: size(l.room.d, '방 세로'), h: size(l.room.h, '방 높이') },
@@ -109,6 +114,12 @@ export function parseImport(raw) {
       createdAt,
       updatedAt: time(l.updatedAt) || createdAt,
     };
+    // 이 배치도를 배치할 때 쓴 기준. 다른 기기에서 열어도 같은 기준으로 보이도록 배치도와 함께 다닌다.
+    const gap = rule(l.gap);
+    const margin = rule(l.margin);
+    if (gap !== undefined) out.gap = gap;
+    if (margin !== undefined) out.margin = margin;
+    return out;
   });
 
   return { furniture: uniqueById(furniture), layouts: uniqueById(layouts), exportedAt: time(raw.exportedAt) };

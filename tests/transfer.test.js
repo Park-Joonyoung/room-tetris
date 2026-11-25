@@ -182,3 +182,29 @@ test('수정 시각이 없는 옛 가구는 0 으로 취급한다', () => {
   const newer = planMerge(db, parseImport({ app: 'room-tetris', version: 1, furniture: [{ ...db.furniture[0], name: '새 이름', updatedAt: 5 }], layouts: [] }));
   assert.equal(newer.furniture[0].name, '새 이름');
 });
+
+test('배치도가 기억하는 간격과 앞 여유 공간도 함께 옮겨진다', async () => {
+  const db = sampleDb();
+  db.layouts[0].gap = 5;
+  db.layouts[0].margin = 60;
+  const viaFile = fromFileText(toFileText(buildExport(db)));
+  assert.equal(viaFile.layouts[0].gap, 5);
+  assert.equal(viaFile.layouts[0].margin, 60);
+  const viaLink = await decodePayload(await encodePayload(buildExport(db)));
+  assert.deepEqual(viaLink.layouts, db.layouts);
+  // 합친 뒤에도 그대로 남는다(받는 기기의 설정으로 바뀌지 않는다).
+  const plan = planMerge({ furniture: [], layouts: [], settings: { gap: 20, margin: 0 } }, viaLink);
+  assert.equal(plan.layouts[0].margin, 60);
+});
+
+test('간격·앞 여유 공간 값이 없거나 이상하면 비워 둔다(받는 기기의 설정을 쓰게 됨)', () => {
+  const d = structuredClone(buildExport(sampleDb()));
+  assert.equal('margin' in parseImport(d).layouts[0], false);
+  for (const bad of [-1, 9999, '60', null, NaN]) {
+    d.layouts[0].margin = bad;
+    d.layouts[0].gap = bad;
+    const out = parseImport(d).layouts[0];
+    assert.equal('margin' in out, false, String(bad));
+    assert.equal('gap' in out, false, String(bad));
+  }
+});

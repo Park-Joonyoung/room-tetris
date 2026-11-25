@@ -5,6 +5,10 @@ import { solve, seededRandom } from './solver.js';
 import { rectOf, clamp } from './geom.js';
 import { TransferError, LINK_PARAM, LONG_LINK_CHARS, buildExport, planMerge, toFileText, fromFileText, encodePayload, decodePayload, makeLink, extractPayload } from './transfer.js';
 
+// 안드로이드 앱(WebView) 안에서 열렸을 때만 있는 기능 모음. 브라우저에서는 null.
+// WebView 는 파일 내려받기·공유를 스스로 못 해서 앱이 대신 해 준다(android/ 의 MainActivity).
+const nativeApp = typeof window.RoomTetrisApp === 'object' && window.RoomTetrisApp ? window.RoomTetrisApp : null;
+
 const app = document.getElementById('app');
 const overlayRoot = document.getElementById('overlay-root');
 const toastRoot = document.getElementById('toast-root');
@@ -501,11 +505,14 @@ async function createLayout(draft) {
   const items = db.furniture
     .filter((f) => draft.selected.has(f.id))
     .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0 }));
-  const result = await runSolver(room, items);
+  // 배치할 때 쓴 간격·앞 여유 공간을 배치도에 함께 적어 둔다.
+  // 설정이 다른 기기에서 열어도 이 배치도는 같은 기준으로 보인다.
+  const rules = { gap: db.settings.gap, margin: db.settings.margin };
+  const result = await runSolver(room, items, rules);
   if (!result) return null; // 사용자가 취소함
   applyPlacements(items, result);
   const now = Date.now();
-  const layout = { id: uid(), name: draft.name, room, items, createdAt: now, updatedAt: now };
+  const layout = { id: uid(), name: draft.name, room, ...rules, items, createdAt: now, updatedAt: now };
   db.layouts.unshift(layout);
   persist();
   pendingNotice = { id: layout.id, message: resultMessage(result, items.length) };
@@ -543,12 +550,12 @@ let activeSolve = null;
  * @returns {Promise<object|null>} 배치 결과. 사용자가 취소하면 null.
  *   화면을 떠나서 중단된 경우에는 끝나지 않는다(이어서 할 일이 없으므로).
  */
-function runSolver(room, items, { shuffle = false } = {}) {
+function runSolver(room, items, { shuffle = false, gap = db.settings.gap, margin = db.settings.margin } = {}) {
   const job = {
     room,
     items: items.map(({ id, w, d, h: height }) => ({ id, w, d, h: height })),
-    gap: db.settings.gap,
-    margin: db.settings.margin,
+    gap,
+    margin,
     timeLimitMs: SOLVE_LIMIT_MS,
     seed: shuffle ? Math.floor(Math.random() * 0xffffffff) : null,
   };
@@ -643,13 +650,22 @@ async function openEditor(layout) {
   const hash = `#/layout/${layout.id}`;
   // 편집은 작업본에서 하고, 저장하기를 눌러야 실제 배치도에 반영된다.
   let items = structuredClone(layout.items);
-  let savedJson = JSON.stringify(layout.items);
+  // 이 배치도가 배치될 때 쓴 간격·앞 여유 공간. 화면 표시와 달라붙기는 이 값을 따른다.
+  // (이 값이 생기기 전에 만든 배치도는 이 기기의 설정을 쓴다.)
+  let rules = { gap: layout.gap ?? db.settings.gap, margin: layout.margin ?? db.settings.margin };
+  const stateJson = () => JSON.stringify({ items, rules });
+  let savedJson = stateJson();
+  // 배치도의 앞 여유 공간이 이 기기의 설정과 다르면 보기만 할 수 있다.
+  // 다른 기준으로 섞어 고치면 배치가 어느 기준에도 맞지 않게 되기 때문이다.
+  const readOnly = layout.margin !== undefined && layout.margin !== db.settings.margin;
+  const readOnlyText = `읽기 전용: 이 배치도의 앞 여유 공간(${num(rules.margin)}cm)이 이 기기의 설정(${num(db.settings.margin)}cm)과 달라서 수정할 수 없어요. 수정하려면 배치도를 새로 만들어 주세요.`;
+  const blockedEdit = () => toast(readOnlyText, 5000);
   const history = [];
   let view = null;
   let destroyed = false;
   let leaveModal = null;
 
-  const isDirty = () => JSON.stringify(items) !== savedJson;
+  const isDirty = () => stateJson() !== savedJson;
 
   const stage = h('div', { class: 'ed-stage' });
   const banner = h('div', { class: 'ed-banner', hidden: true });
@@ -673,6 +689,7 @@ async function openEditor(layout) {
     },
     icon('back'),
   );
+  const subtitle = h('small', null);
   const touch = matchMedia('(pointer: coarse)').matches;
   const hint = h(
     'p',
@@ -687,7 +704,7 @@ async function openEditor(layout) {
     h(
       'div',
       { class: 'editor' },
-      h('header', { class: 'ed-bar' }, backBtn, h('div', { class: 'ed-title' }, h('b', null, layout.name), h('small', null, dimsText(room))), h('div', { class: 'ed-tools' }, undoBtn, arrangeBtn, saveBtn)),
+      h('header', { class: 'ed-bar' }, backBtn, h('div', { class: 'ed-title' }, h('b', null, layout.name), subtitle), h('div', { class: 'ed-tools' }, readOnly ? h('span', { class: 'badge warn' }, '읽기 전용') : [undoBtn, arrangeBtn, saveBtn])),
       h(
         'div',
         { class: 'ed-main' },
@@ -729,11 +746,12 @@ async function openEditor(layout) {
 
   const item = (id) => items.find((it) => it.id === id);
   const snapshot = () => {
-    history.push(JSON.stringify(items));
+    history.push(stateJson());
     if (history.length > 60) history.shift();
   };
   /** 작업본이 바뀐 뒤 화면을 맞춘다. 저장은 하지 않고 저장하기 버튼만 켠다. */
   const refresh = () => {
+    subtitle.textContent = `${dimsText(room)} · 간격 ${num(rules.gap)} · 앞 여유 ${num(rules.margin)}`;
     view?.setItems(items);
     renderInventory();
     undoBtn.disabled = history.length === 0;
@@ -756,8 +774,10 @@ async function openEditor(layout) {
   function save() {
     if (!isDirty()) return;
     layout.items = structuredClone(items);
+    layout.gap = rules.gap;
+    layout.margin = rules.margin;
     layout.updatedAt = Date.now();
-    savedJson = JSON.stringify(items);
+    savedJson = stateJson();
     persist();
     refresh();
     toast('배치도를 저장했어요.');
@@ -790,20 +810,27 @@ async function openEditor(layout) {
   function undo() {
     const prev = history.pop();
     if (!prev) return;
-    items = JSON.parse(prev);
+    ({ items, rules } = JSON.parse(prev));
     refresh();
   }
 
   async function rearrange() {
     if (!items.length) return toast('배치할 가구가 없어요.');
     arrangeBtn.disabled = true;
-    const result = await runSolver(room, items, { shuffle: true });
+    // 다시 배치할 때는 이 기기의 지금 설정을 쓰고, 배치도가 기억하는 값도 그걸로 바꾼다.
+    // (앞 여유 공간이 다르면 읽기 전용이라 여기까지 오지 않는다. 달라질 수 있는 것은 간격뿐이다.)
+    const next = { gap: db.settings.gap, margin: db.settings.margin };
+    const changed = next.gap !== rules.gap || next.margin !== rules.margin;
+    const result = await runSolver(room, items, { shuffle: true, ...next });
     arrangeBtn.disabled = false;
     if (!result || destroyed) return;
     snapshot();
+    rules = next;
     applyPlacements(items, result);
     refresh();
-    showBanner(resultMessage(result, items.length));
+    const message = resultMessage(result, items.length);
+    if (changed) message.text += ` 이 기기의 설정(간격 ${num(next.gap)}cm, 앞 여유 ${num(next.margin)}cm)으로 다시 배치했어요.`;
+    showBanner(message);
   }
 
   let bannerTimer = 0;
@@ -850,6 +877,11 @@ async function openEditor(layout) {
       if (!st || e.pointerId !== st.id || !view) return;
       if (!st.dragging) {
         if (Math.hypot(e.clientX - st.x0, e.clientY - st.y0) < 8) return;
+        if (readOnly) {
+          st = null;
+          blockedEdit();
+          return;
+        }
         if (!view.externalStart(it)) {
           st = null;
           toast('이 가구는 방보다 커서 놓을 수 없어요.');
@@ -871,7 +903,7 @@ async function openEditor(layout) {
       const s = st;
       st = null;
       if (!s.dragging) {
-        if (!cancelled) toast('가구를 끌어서 방에 놓아 보세요.');
+        if (!cancelled) readOnly ? blockedEdit() : toast('가구를 끌어서 방에 놓아 보세요.');
         return;
       }
       s.ghost.remove();
@@ -895,15 +927,17 @@ async function openEditor(layout) {
     return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   };
 
-  renderInventory();
+  refresh();
 
   let RoomView;
   try {
     ({ RoomView } = await import('./room-view.js'));
     if (destroyed) return;
     view = new RoomView(stage, {
-      getGap: () => db.settings.gap,
-      getMargin: () => db.settings.margin,
+      getGap: () => rules.gap,
+      getMargin: () => rules.margin,
+      isReadOnly: () => readOnly,
+      onBlockedEdit: blockedEdit,
       onInteract: () => hint.classList.add('gone'),
       onPlainWheel() {
         if (Date.now() - wheelHintAt < 4000) return;
@@ -937,7 +971,8 @@ async function openEditor(layout) {
   view.setRoom(room);
   view.setItems(items);
 
-  if (pendingNotice && pendingNotice.id === layout.id) showBanner(pendingNotice.message);
+  if (readOnly) showBanner({ ok: false, text: readOnlyText });
+  else if (pendingNotice && pendingNotice.id === layout.id) showBanner(pendingNotice.message);
   pendingNotice = null;
 }
 
@@ -1026,7 +1061,11 @@ function exportFile() {
   if (!hasData()) return;
   const d = new Date();
   const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  downloadFile(`room-tetris-${stamp}.json`, toFileText(buildExport(db)));
+  const name = `room-tetris-${stamp}.json`;
+  const text = toFileText(buildExport(db));
+  // 앱에서는 저장할 위치를 고르는 화면이 뜨고, 저장이 끝나면 앱이 알려 준다.
+  if (nativeApp?.saveFile) return void nativeApp.saveFile(name, text);
+  downloadFile(name, text);
   toast('파일로 저장했어요. 다른 기기로 옮긴 뒤 설정에서 가져오세요.');
 }
 
@@ -1051,10 +1090,14 @@ async function copyLink() {
   if (!hasData()) return;
   try {
     const link = await exportLink();
-    try {
-      await navigator.clipboard.writeText(link);
-    } catch {
-      return showLink(link, '아래 링크를 길게 눌러 복사한 뒤 다른 기기로 보내 주세요.');
+    if (nativeApp?.copy) {
+      nativeApp.copy(link);
+    } else {
+      try {
+        await navigator.clipboard.writeText(link);
+      } catch {
+        return showLink(link, '아래 링크를 길게 눌러 복사한 뒤 다른 기기로 보내 주세요.');
+      }
     }
     if (link.length > LONG_LINK_CHARS) showMessage('링크를 복사했어요', LONG_LINK_NOTE);
     else toast('링크를 복사했어요. 다른 기기로 보내서 열어 주세요.');
@@ -1067,6 +1110,7 @@ async function shareLink() {
   if (!hasData()) return;
   try {
     const link = await exportLink();
+    if (nativeApp?.share) return void nativeApp.share(link);
     await navigator.share({ title: '룸 테트리스 데이터', url: link });
   } catch (err) {
     if (err?.name !== 'AbortError') toast('공유하지 못했어요. 링크 복사를 이용해 주세요.');
@@ -1154,7 +1198,7 @@ function renderSettings(page) {
       h('p', null, '가구를 쓰려면 앞에 서거나 앉을 자리가 필요해요. 자동 배치할 때 가구 앞(벽 반대쪽)으로 이만큼은 다른 가구가 들어오지 않게 비워 둬요. 0으로 두면 여유 없이 배치해요.'),
       cmStepper('margin', 5, '가구 앞 여유 공간'),
       h('p', { class: 'hint' }, '배치도에서 가구를 누르면 이 공간이 바닥에 옅게 표시돼요. 직접 끌어서 놓을 때는 막지 않으니 표시를 보고 조절하세요.'),
-      h('p', { class: 'hint' }, '간격과 여유 공간을 바꾸면 다음 자동 배치부터 적용돼요. 이미 만든 배치도는 편집 화면에서 자동 배치를 누르면 새 값으로 다시 배치돼요.'),
+      h('p', { class: 'hint' }, '간격과 여유 공간은 배치도를 만들 때의 값이 그 배치도에 함께 저장돼요. 그래서 설정을 바꾸거나 다른 기기에서 열어도 이미 만든 배치도는 그대로예요. 다만 앞 여유 공간이 지금 설정과 다른 배치도는 읽기 전용으로 열려서 볼 수만 있어요. 고치려면 설정을 맞추거나 배치도를 새로 만들어 주세요.'),
     ),
     h('section', { class: 'panel' }, h('h2', null, '화면 모드'), h('div', { class: 'seg', role: 'group', 'aria-label': '화면 모드' }, themeButtons)),
     renderDataPanel(page),
@@ -1200,7 +1244,7 @@ function renderDataPanel(page) {
       { class: 'btn-row' },
       h('button', { class: 'btn', type: 'button', onclick: exportFile }, '파일로 저장'),
       h('button', { class: 'btn', type: 'button', onclick: copyLink }, '링크 복사'),
-      typeof navigator.share === 'function' ? h('button', { class: 'btn', type: 'button', onclick: shareLink }, '링크 공유') : null,
+      typeof navigator.share === 'function' || nativeApp?.share ? h('button', { class: 'btn', type: 'button', onclick: shareLink }, '링크 공유') : null,
     ),
     h('h3', null, '가져오기'),
     h('div', { class: 'btn-row' }, h('button', { class: 'btn', type: 'button', onclick: () => fileInput.click() }, '파일 선택')),
@@ -1208,7 +1252,7 @@ function renderDataPanel(page) {
     h(
       'p',
       { class: 'hint' },
-      '가져온 내용은 지금 데이터에 합쳐져요. 없는 것은 추가되고, 같은 항목은 더 최근에 고친 쪽이 남아요. 받은 링크를 그냥 눌러도 가져오기 창이 열리지만, 카카오톡 같은 앱 안에서 열린 화면은 저장 공간이 따로라서 평소 쓰는 브라우저에 링크를 붙여넣는 쪽이 확실해요.',
+      '가져온 내용은 지금 데이터에 합쳐져요. 없는 것은 추가되고, 같은 항목은 더 최근에 고친 쪽이 남아요. 받은 링크를 눌렀을 때 카카오톡 같은 다른 앱 안의 화면으로 열리면 거기에만 저장되니, 그럴 때는 링크를 복사해서 여기에 붙여넣어 주세요.',
     ),
     backup
       ? h(

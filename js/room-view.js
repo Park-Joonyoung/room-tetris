@@ -20,6 +20,8 @@ export class RoomView {
    * @param {{
    *   getGap?: () => number,
    *   getMargin?: () => number,
+   *   isReadOnly?: () => boolean,      // true 면 가구를 옮길 수 없다(보기만 가능)
+   *   onBlockedEdit?: () => void,      // 읽기 전용인데 가구를 끌려고 했을 때
    *   onMove?: (id: string, x: number, z: number, rot: number, displaced: string[]) => void,
    *   onStash?: (id: string) => void,
    *   isOverInventory?: (clientX: number, clientY: number) => boolean,
@@ -422,8 +424,11 @@ export class RoomView {
     dims.textContent = `${num(item.w)} × ${num(item.d)} × ${num(item.h)} cm`;
     const actions = document.createElement('div');
     actions.className = 'tag-actions';
-    actions.append(tagButton('인벤토리로', () => this.cb.onStash?.(item.id)));
-    this.tag.append(name, dims, actions);
+    this.tag.append(name, dims);
+    if (!this.cb.isReadOnly?.()) {
+      actions.append(tagButton('인벤토리로', () => this.cb.onStash?.(item.id)));
+      this.tag.append(actions);
+    }
     this.tag.hidden = false;
   }
 
@@ -582,6 +587,12 @@ export class RoomView {
     if (!g) return;
     if (g.type === 'press') {
       if (Math.hypot(e.clientX - g.x0, e.clientY - g.y0) < (g.touch ? 8 : 4)) return;
+      if (this.cb.isReadOnly?.()) {
+        // 읽기 전용: 가구는 그대로 두고 왜 못 옮기는지만 알려 준다.
+        this.gesture = { type: 'blocked' };
+        this.cb.onBlockedEdit?.();
+        return;
+      }
       this.startItemDrag(g);
       g = this.gesture;
       if (!g) return;
