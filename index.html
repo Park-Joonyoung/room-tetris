@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>룸 테트리스 · 가구 배치 도우미</title>
+    <meta name="description" content="방의 가로·세로·높이를 입력하면 가구를 두 벽면에 자동으로 배치해 주는 3D 가구 배치 도우미" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="css/style.css" />
+    <script>
+      // 첫 화면이 깜빡이지 않도록 저장된 화면 모드를 바로 적용한다.
+      (function () {
+        var pref = 'system';
+        try {
+          pref = (JSON.parse(localStorage.getItem('room-tetris:v1') || '{}').settings || {}).theme || 'system';
+        } catch (e) {}
+        var dark = pref === 'dark' || (pref !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      })();
+    </script>
+    <script type="importmap">
+      { "imports": { "three": "./vendor/three.module.min.js" } }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="overlay-root"></div>
+    <div id="toast-root" aria-live="polite"></div>
+    <noscript>이 앱을 사용하려면 자바스크립트를 켜 주세요.</noscript>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

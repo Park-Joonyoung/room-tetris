@@ -1,0 +1,12 @@
+{
+  "name": "룸 테트리스",
+  "short_name": "룸 테트리스",
+  "description": "방 크기를 입력하면 가구를 두 벽면에 자동으로 배치해 주는 3D 가구 배치 도우미",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f5f7",
+  "theme_color": "#4f46e5",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
