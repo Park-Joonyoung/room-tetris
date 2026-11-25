@@ -11,3 +11,6 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+
+# 내려받은 APK
+*.apk

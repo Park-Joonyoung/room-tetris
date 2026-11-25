@@ -690,7 +690,8 @@ async function openEditor(layout) {
     icon('back'),
   );
   const subtitle = h('small', null);
-  const touch = matchMedia('(pointer: coarse)').matches;
+  // 앱 안에서는 항상 손가락으로 쓰므로 터치용 안내를 보여 준다.
+  const touch = !!nativeApp || matchMedia('(pointer: coarse)').matches;
   const hint = h(
     'p',
     { class: 'ed-hint' },
