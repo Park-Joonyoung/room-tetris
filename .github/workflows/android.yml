@@ -1,0 +1,121 @@
+name: Android APK
+
+# 안드로이드 앱 껍데기(android/)가 바뀌었을 때만 APK 를 다시 만든다.
+# 앱은 배포된 웹 주소를 불러오기만 하므로, 웹(js/, css/ 등)만 고쳤을 때는 APK 를 다시 만들 필요가 없다.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: APK 빌드
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+
+      # 서명 키는 저장소에 없고 Actions 시크릿에만 있다. 항상 같은 키로 서명해야
+      # 새 APK 를 기존 앱 위에 덮어 설치할 수 있다(앱 안의 데이터가 유지된다).
+      - name: 서명 키 준비
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo "::error::KEYSTORE_BASE64 시크릿이 없습니다"; exit 1; }
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: APK 빌드
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          gradle -p android --no-daemon assembleRelease -PversionCode=${{ github.run_number }}
+          cp android/app/build/outputs/apk/release/app-release.apk room-tetris.apk
+          ls -l room-tetris.apk
+
+      - name: 서명 확인
+        run: |
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
+          "$APKSIGNER" verify --print-certs room-tetris.apk | head -3
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: room-tetris-apk
+          path: room-tetris.apk
+
+  smoke:
+    name: 에뮬레이터에서 실행 확인
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: room-tetris-apk
+
+      - name: KVM 사용 설정
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: 앱 설치 후 화면 캡처
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash android/ci-smoke.sh room-tetris.apk
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-screens
+          path: smoke/
+
+  release:
+    name: 릴리스에 올리기
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: room-tetris-apk
+
+      # 'apk' 라는 고정 릴리스 하나에 항상 최신 APK 를 덮어쓴다(내려받는 주소가 바뀌지 않는다).
+      - name: 릴리스 갱신
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          NOTES="룸 테트리스 안드로이드 앱입니다. 아래 room-tetris.apk 를 휴대폰에 내려받아 설치하세요.
+
+          - 빌드 번호: ${{ github.run_number }} (${GITHUB_SHA::7})
+          - 앱은 웹 버전(https://park-joonyoung.github.io/room-tetris/)을 불러와 보여 주므로 인터넷 연결이 필요합니다.
+          - 웹 버전이 바뀌면 앱에도 바로 반영됩니다. APK 를 다시 설치할 필요는 없습니다."
+          if gh release view apk >/dev/null 2>&1; then
+            gh release upload apk room-tetris.apk --clobber
+            gh release edit apk --notes "$NOTES"
+          else
+            gh release create apk room-tetris.apk --title "안드로이드 앱 (APK)" --notes "$NOTES"
+          fi

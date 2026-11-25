@@ -1,0 +1,49 @@
+plugins {
+    id 'com.android.application'
+}
+
+// 서명 키는 저장소에 넣지 않는다. CI 가 환경 변수로 넘겨 준다(.github/workflows/android.yml).
+def keystoreFile = System.getenv('KEYSTORE_FILE')
+def keystorePassword = System.getenv('KEYSTORE_PASSWORD')
+
+android {
+    namespace 'io.github.parkjoonyoung.roomtetris'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.parkjoonyoung.roomtetris'
+        minSdk 26
+        // 34 로 두면 화면이 상태 표시줄 아래로 깔리지 않아 웹 화면을 그대로 쓸 수 있다.
+        targetSdk 34
+        versionCode((project.findProperty('versionCode') ?: '1') as Integer)
+        versionName "1.${project.findProperty('versionCode') ?: '0'}"
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreFile) {
+                storeFile file(keystoreFile)
+                storePassword keystorePassword
+                keyAlias 'roomtetris'
+                keyPassword keystorePassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (keystoreFile) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
