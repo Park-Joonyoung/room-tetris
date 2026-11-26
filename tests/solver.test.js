@@ -493,3 +493,197 @@ test('우선순위: 작은 입력에서 격자 전수 탐색과 같은 등급별
     );
   }
 });
+
+// ───────────── 고정된 가구 ─────────────
+
+/** 고정된 가구(자리·방향이 정해진 것)를 검사 도구가 쓰는 모양으로 바꾼다. */
+function fixedShape(f, margin) {
+  const sideways = f.rot % 2 === 1;
+  return { id: `fixed@${f.x},${f.z}`, r: { x: f.x, z: f.z, sx: sideways ? f.d : f.w, sz: sideways ? f.w : f.d }, wall: f.rot, m: frontNeed(f, margin) };
+}
+
+/** 새로 놓은 가구들이 고정된 가구와도 간격·앞 여유 공간을 지키는지 검사한다. */
+function validateWithFixed(room, items, gap, result, margin, fixed) {
+  validate(room, items, gap, result, margin);
+  const byId = new Map(items.map((it) => [it.id, it]));
+  const still = fixed.map((f) => fixedShape(f, margin));
+  for (const p of result.placements) {
+    const it = byId.get(p.id);
+    const wall = WALLS.indexOf(p.wall);
+    const mine = { r: rectOn(room, wall, wall % 2 === 0 ? p.x : p.z, it), wall, m: frontNeed(it, margin) };
+    for (const f of still) assert.ok(compatible(mine, f, gap), `${p.id} 가 고정된 가구(${f.id})와 간격이나 앞 여유 공간을 어김`);
+  }
+}
+
+/** gridMax 와 같은 격자 전수 탐색인데, 고정된 가구가 처음부터 놓여 있다. */
+function gridMaxWithFixed(room, items, gap, margin, step, fixed) {
+  const n = items.length;
+  let best = 0;
+  const placed = fixed.map((f) => fixedShape(f, margin));
+  const rec = (i, count) => {
+    if (best === n || count + (n - i) <= best) return;
+    if (i === n) {
+      best = count;
+      return;
+    }
+    const it = items[i];
+    const m = frontNeed(it, margin);
+    if (it.h <= room.h) {
+      for (let wall = 0; wall < 4; wall++) {
+        const L = wall % 2 === 0 ? room.w : room.d;
+        for (let t = 0; t + it.w <= L; t += step) {
+          const cand = { r: rectOn(room, wall, t, it), wall, m };
+          if (!inside(room, cand.r) || (m > 0 && !inside(room, frontOf(cand.r, wall, m)))) continue;
+          if (!placed.every((o) => compatible(cand, o, gap))) continue;
+          placed.push(cand);
+          rec(i + 1, count + 1);
+          placed.pop();
+        }
+      }
+    }
+    rec(i + 1, count);
+  };
+  rec(0, 0);
+  return best;
+}
+
+const fx = (x, z, w, d, rot, extra = {}) => ({ x, z, w, d, rot, ...extra });
+
+test('고정된 가구: 결과에는 들어가지 않고, 나머지 가구가 그 자리를 피해 놓인다', () => {
+  const room = { w: 300, d: 200, h: 240 };
+  const fixed = [fx(0, 0, 200, 60, 0)]; // 벽 A 의 왼쪽 200 을 차지
+  const items = [mk('a', 150, 50), mk('b', 90, 50)];
+  const r = solve(room, items, 5, { fixed });
+  validateWithFixed(room, items, 5, r, 0, fixed);
+  assert.equal(r.complete, true);
+  assert.deepEqual(r.placements.map((p) => p.id).sort(), ['a', 'b']);
+  // 벽 A 에 남은 자리는 95 뿐이라 a(150) 는 다른 벽으로 간다.
+  assert.notEqual(r.placements.find((p) => p.id === 'a').wall, 'A');
+});
+
+test('고정된 가구: 고정된 가구가 없을 때 들어가던 가구가 자리를 뺏기면 남는다', () => {
+  // 방 세로 100 이라 긴 벽 둘 중 하나에만 깊이 90 짜리를 놓을 수 있다.
+  const room = { w: 300, d: 100, h: 240 };
+  const items = [mk('a', 280, 90)];
+  assert.equal(solve(room, items, 5).complete, true);
+  const fixed = [fx(100, 0, 100, 90, 0)];
+  const r = solve(room, items, 5, { fixed });
+  validateWithFixed(room, items, 5, r, 0, fixed);
+  assert.deepEqual(r.unplaced, ['a']);
+  assert.equal(r.timedOut, false);
+});
+
+test('고정된 가구: 고정된 가구의 앞 여유 공간도 비워 둔다', () => {
+  // 벽 B 에 고정된 가구(깊이 60, 앞 여유 100)가 z 0~200 을 차지한다. 벽 A·C 의 가구는 x < 160 구간에 들어올 수 없다.
+  const room = { w: 400, d: 200, h: 240 };
+  const fixed = [fx(0, 0, 200, 60, 1)];
+  const items = [mk('a', 230, 40, 100, { clear: false })];
+  const r = solve(room, items, 5, { margin: 100, fixed });
+  validateWithFixed(room, items, 5, r, 100, fixed);
+  assert.equal(r.complete, true);
+  assert.ok(r.placements[0].x >= 160 - TOL, JSON.stringify(r.placements[0]));
+  // 250 짜리는 x ≥ 160 구간(길이 240)에 안 들어간다.
+  const wide = [mk('w', 250, 40, 100, { clear: false })];
+  assert.equal(solve(room, wide, 5, { margin: 100, fixed }).complete, false);
+  // 앞 여유 공간이 필요 없는 고정 가구라면 간격만 지키면 된다(400 - 60 - 5 ≥ 250).
+  const bare = [fx(0, 0, 200, 60, 1, { clear: false })];
+  const r2 = solve(room, wide, 5, { margin: 100, fixed: bare });
+  validateWithFixed(room, wide, 5, r2, 100, bare);
+  assert.equal(r2.complete, true);
+});
+
+test('고정된 가구: 고정된 가구 사이에 끼인 벽 토막도 쓴다', () => {
+  // 방 세로가 가구 깊이와 같아서 사실상 벽 A 한 줄뿐이다. 고정된 가구 둘이 그 줄을 150 | 200 | 150 으로 나눈다.
+  const room = { w: 600, d: 50, h: 240 };
+  const fixed = [fx(150, 0, 50, 50, 0), fx(400, 0, 50, 50, 0)];
+  const items = [mk('a', 150, 50), mk('b', 150, 50), mk('c', 200, 50)];
+  const r = solve(room, items, 0, { fixed });
+  validateWithFixed(room, items, 0, r, 0, fixed);
+  assert.equal(r.complete, true);
+  assert.equal(r.placements.find((p) => p.id === 'c').x, 200);
+});
+
+test('고정된 가구: 방 한가운데에 고정된 가구도 피한다', () => {
+  // 벽 A 에서 30 떨어진 곳에 고정된 가구. 깊이 20 짜리는 간격 5 를 두고 그 뒤를 지나가지만 깊이 40 짜리는 못 지나간다.
+  // 맞은편 벽 C 는 다른 고정 가구가 다 차지하고, 짧은 벽(150)에는 가로 200 이 안 들어간다.
+  const room = { w: 200, d: 150, h: 240 };
+  const fixed = [fx(0, 30, 200, 50, 0, { clear: false }), fx(0, 100, 200, 50, 2, { clear: false })];
+  const thin = [mk('thin', 200, 20)];
+  const r = solve(room, thin, 5, { fixed });
+  validateWithFixed(room, thin, 5, r, 0, fixed);
+  assert.equal(r.complete, true);
+  assert.deepEqual([r.placements[0].wall, r.placements[0].z], ['A', 0]);
+  const deep = [mk('deep', 200, 40)];
+  const r2 = solve(room, deep, 5, { fixed });
+  validateWithFixed(room, deep, 5, r2, 0, fixed);
+  assert.deepEqual(r2.unplaced, ['deep']);
+  assert.equal(gridMaxWithFixed(room, deep, 5, 0, 5, fixed), 0);
+});
+
+test('고정된 가구: 무작위 입력에서도 고정된 가구와의 규칙을 지킨다', () => {
+  const rnd = lcg(97531);
+  for (let t = 0; t < 150; t++) {
+    const room = { w: 150 + Math.floor(rnd() * 450), d: 150 + Math.floor(rnd() * 450), h: 240 };
+    const fixed = Array.from({ length: 1 + Math.floor(rnd() * 4) }, () => {
+      const rot = Math.floor(rnd() * 4);
+      const w = 20 + Math.floor(rnd() * 100);
+      const d = 20 + Math.floor(rnd() * 60);
+      const sx = rot % 2 ? d : w;
+      const sz = rot % 2 ? w : d;
+      // 대부분은 벽에 붙어 있고, 가끔은 방 안쪽 아무 데나 있다.
+      let x = Math.floor(rnd() * (room.w - sx));
+      let z = Math.floor(rnd() * (room.d - sz));
+      if (rnd() < 0.75) {
+        if (rot === 0) z = 0;
+        else if (rot === 1) x = 0;
+        else if (rot === 2) z = room.d - sz;
+        else x = room.w - sx;
+      }
+      return fx(x, z, w, d, rot, rnd() < 0.3 ? { clear: false } : {});
+    });
+    const items = Array.from({ length: 1 + Math.floor(rnd() * 9) }, (_, i) =>
+      mk(`i${i}`, 20 + Math.floor(rnd() * 200), 20 + Math.floor(rnd() * 100), 100, rnd() < 0.25 ? { clear: false } : {}),
+    );
+    const gap = Math.floor(rnd() * 4) * 5;
+    const margin = Math.floor(rnd() * 4) * 30;
+    validateWithFixed(room, items, gap, solve(room, items, gap, { margin, fixed, timeLimitMs: 60 }), margin, fixed);
+    validateWithFixed(room, items, gap, solve(room, items, gap, { margin, fixed, timeLimitMs: 60, random: rnd }), margin, fixed);
+  }
+});
+
+test('고정된 가구: 작은 입력은 격자 전수 탐색과 같은 개수를 배치한다', () => {
+  const rnd = lcg(13579);
+  const ten = (lo, hi) => 10 * (lo + Math.floor(rnd() * (hi - lo + 1)));
+  for (let t = 0; t < 200; t++) {
+    const room = { w: ten(10, 24), d: ten(10, 24), h: 240 };
+    const fixed = Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => {
+      const rot = Math.floor(rnd() * 4);
+      const w = ten(2, 8);
+      const d = ten(2, 6);
+      const sx = rot % 2 ? d : w;
+      const sz = rot % 2 ? w : d;
+      let x = 10 * Math.floor((rnd() * (room.w - sx)) / 10);
+      let z = 10 * Math.floor((rnd() * (room.d - sz)) / 10);
+      if (rnd() < 0.7) {
+        if (rot === 0) z = 0;
+        else if (rot === 1) x = 0;
+        else if (rot === 2) z = room.d - sz;
+        else x = room.w - sx;
+      }
+      return fx(x, z, w, d, rot, rnd() < 0.3 ? { clear: false } : {});
+    });
+    const n = 2 + Math.floor(rnd() * 3);
+    const items = Array.from({ length: n }, (_, i) => mk(`i${i}`, ten(3, 14), ten(2, 8), 100, rnd() < 0.25 ? { clear: false } : {}));
+    const gap = 10 * Math.floor(rnd() * 2);
+    const margin = t % 4 === 0 ? 0 : 20 * Math.floor(rnd() * 5);
+    const r = solve(room, items, gap, { margin, fixed, timeLimitMs: 8000 });
+    validateWithFixed(room, items, gap, r, margin, fixed);
+    assert.equal(r.timedOut, false, `case ${t} 시간 초과`);
+    const expected = gridMaxWithFixed(room, items, gap, margin, 10, fixed);
+    assert.equal(
+      r.placements.length,
+      expected,
+      `case ${t}: room ${room.w}x${room.d} gap=${gap} margin=${margin} fixed=${JSON.stringify(fixed)} items=${items.map((i) => `${i.w}x${i.d}${i.clear === false ? '*' : ''}`).join(',')}`,
+    );
+  }
+});

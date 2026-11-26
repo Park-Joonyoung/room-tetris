@@ -256,6 +256,21 @@ test('자동 배치에서 빼 둔 인벤토리 가구 표시(aside)가 옮겨진
   assert.equal('aside' in parseImport(d).layouts[0].items[0], false);
 });
 
+test('위치를 고정한 가구 표시(locked)가 옮겨진다', async () => {
+  const db = sampleDb();
+  db.layouts[0].items[0].locked = true;
+  const back = await decodePayload(await encodePayload(buildExport(db)));
+  assert.deepEqual(back.layouts, db.layouts);
+  assert.equal(back.layouts[0].items[0].locked, true);
+  // 인벤토리에 있는 가구나 true 가 아닌 값에는 남지 않는다.
+  const d = structuredClone(buildExport(db));
+  d.layouts[0].items.push({ ...placed('i8', '선반'), placed: false, locked: true });
+  d.layouts[0].items[0].locked = 'yes';
+  const out = parseImport(d);
+  assert.equal('locked' in out.layouts[0].items[0], false);
+  assert.equal('locked' in out.layouts[0].items.at(-1), false);
+});
+
 test('가구 우선순위(1~99 정수)가 옮겨지고, 이상한 값은 버린다', async () => {
   const db = sampleDb();
   db.furniture[0].priority = 1;

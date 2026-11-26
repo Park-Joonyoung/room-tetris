@@ -23,6 +23,10 @@
 //   가구에 우선순위(1~99, 작을수록 먼저)를 줄 수 있다. 우선순위가 높은 가구부터 놓아 보고,
 //   자리가 모자랄 때도 높은 우선순위의 가구를 먼저 챙긴다: 우선순위 1 인 가구를 가장 많이 놓는 배치,
 //   그중에서 우선순위 2 를 가장 많이 놓는 배치, … 순으로 고른다. 우선순위가 없는 가구는 맨 뒤다.
+//
+// 고정된 가구
+//   이미 자리가 정해져서 움직이면 안 되는 가구(opts.fixed)는 처음부터 놓여 있는 장애물로 다룬다.
+//   나머지 가구는 이 가구들과도 간격·앞 여유 공간을 지키며 놓인다. 고정된 가구는 결과에 들어가지 않는다.
 
 const EPS = 1e-6;
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -39,6 +43,7 @@ export const DEFAULT_TIME_LIMIT_MS = 30000;
  *   margin?: number,                 // 가구 앞 여유 공간(cm)
  *   timeLimitMs?: number,
  *   random?: () => number,           // 주면 매번 다른 배치를 시도
+ *   fixed?: {x:number,z:number,w:number,d:number,rot:0|1|2|3,clear?:boolean}[], // 그 자리에 그대로 둘 가구
  *   onProgress?: (result: object) => void, // 더 좋은 배치를 찾을 때마다(자주는 아님) 호출
  * }} [opts]
  * @returns {{placements:{id:string,x:number,z:number,rot:0|1|2|3,wall:'A'|'B'|'C'|'D'}[], unplaced:string[], complete:boolean, timedOut:boolean}}
@@ -48,6 +53,7 @@ export function solve(room, items, gap = 0, opts = {}) {
   const { timeLimitMs = DEFAULT_TIME_LIMIT_MS, random = null, onProgress = null } = opts;
   gap = Math.max(0, gap);
   const margin = Math.max(0, opts.margin || 0);
+  const fixed = Array.isArray(opts.fixed) ? opts.fixed : [];
   // tally: 우선순위 등급별로 놓은 가구 수(높은 등급부터). 이 값이 사전식으로 큰 배치가 더 좋은 배치다.
   const best = { tally: null, volume: -1, place: null, dirty: false, reportedAt: 0 };
 
@@ -71,7 +77,7 @@ export function solve(room, items, gap = 0, opts = {}) {
   let timedOut = false;
   search: for (;;) {
     for (const order of ['big', 'small']) {
-      const res = runSearch(room, items, gap, { margin, rank, levels, order, random, deadline: Math.min(end, now() + slice), best, report });
+      const res = runSearch(room, items, gap, { margin, fixed, rank, levels, order, random, deadline: Math.min(end, now() + slice), best, report });
       timedOut = res.timedOut;
       // 시간 안에 끝났다면 모든 경우를 다 봤거나 놓을 수 있는 가구를 전부 놓은 것이므로 더 좋은 답은 없다.
       if (!res.timedOut || now() >= end) break search;
@@ -96,7 +102,7 @@ function round(v) {
   return Math.round(v * 1000) / 1000;
 }
 
-function runSearch(room, items, gap, { margin, rank, levels, order, random, deadline, best, report }) {
+function runSearch(room, items, gap, { margin, fixed, rank, levels, order, random, deadline, best, report }) {
   const n = items.length;
   const W = room.w;
   const D = room.d;
@@ -137,6 +143,39 @@ function runSearch(room, items, gap, { margin, rank, levels, order, random, dead
   let count = 0;
   let volume = 0;
   const tally = new Array(levels).fill(0); // 등급별로 지금 놓여 있는 가구 수
+
+  // 고정된 가구를 장애물로 먼저 깔아 둔다(placed 의 앞쪽 F 개). 탐색 중에는 빼지 않는다.
+  const F = fixed.length;
+  const cover = [[], [], [], []]; // 벽마다, 고정된 가구가 벽에 붙어서 차지한 구간
+  for (const f of fixed) {
+    const sideways = f.rot & 1;
+    const x0 = f.x;
+    const x1 = f.x + (sideways ? f.d : f.w);
+    const z0 = f.z;
+    const z1 = f.z + (sideways ? f.w : f.d);
+    const m = f.clear === false ? 0 : margin;
+    let zone = null;
+    if (m > 0) {
+      if (f.rot === 1) zone = [x1, x1 + m, z0, z1];
+      else if (f.rot === 2) zone = [x0, x1, z0 - m, z0];
+      else if (f.rot === 3) zone = [x0 - m, x0, z0, z1];
+      else zone = [x0, x1, z1, z1 + m];
+    }
+    placed.push({ b: [x0, x1, z0, z1], zone });
+    if (z0 <= EPS) cover[0].push([x0, x1 + gap]);
+    if (x0 <= EPS) cover[1].push([z0, z1 + gap]);
+    if (z1 >= D - EPS) cover[2].push([x0, x1 + gap]);
+    if (x1 >= W - EPS) cover[3].push([z0, z1 + gap]);
+  }
+  // 벽에 붙은 고정 가구 옆으로는 그 벽의 다른 가구가 간격을 두고 서야 하므로, 그만큼 벽 길이를 쓴 것으로 친다
+  // (가지치기의 상한 계산에 쓴다). 고정 가구끼리 겹쳐 있을 수도 있어서 구간을 합친 길이로 센다.
+  for (let wall = 0; wall < 4; wall++) {
+    let reach = -Infinity;
+    for (const [s0, s1] of cover[wall].sort((a, b) => a[0] - b[0])) {
+      used[wall] += Math.max(0, s1 - Math.max(s0, reach));
+      reach = Math.max(reach, s1);
+    }
+  }
 
   /** 지금 배치가 지금까지의 최고 기록보다 좋은가: 높은 등급부터 놓은 수를 비교하고, 다 같으면 부피. */
   function isBetter() {
@@ -240,6 +279,39 @@ function runSearch(room, items, gap, { margin, rank, levels, order, random, dead
   }
 
   /**
+   * 고정된 가구가 벽 중간을 막고 있으면 벽이 여러 토막으로 나뉜다. 끝에서부터만 찾으면 첫 토막이 다 차기
+   * 전에는 다음 토막에 닿지 못하므로, 고정된 가구를 막 지난 자리(모서리에서 잰 거리)들도 출발점으로 돌려준다.
+   * 막는 구간은 findSpot 과 같은 방법으로 구한다.
+   */
+  function fixedStarts(wall, fromEnd, len, dep, m, baseDist) {
+    const L = wallLen[wall];
+    const si = (wall & 1) * 2;
+    const pi = 2 - si;
+    const far = wallDepth[wall];
+    const bp0 = wall < 2 ? 0 : far - dep;
+    const bp1 = wall < 2 ? dep : far;
+    const zp0 = wall < 2 ? dep : far - dep - m;
+    const zp1 = wall < 2 ? dep + m : far - dep;
+    const out = [];
+    const add = (lo, hi) => {
+      const dist = fromEnd === 0 ? hi : L - len - lo;
+      if (dist > baseDist + EPS && dist <= L - len + EPS) out.push(round(dist));
+    };
+    for (let k = 0; k < F; k++) {
+      const o = placed[k];
+      const os0 = o.b[si];
+      const os1 = o.b[si + 1];
+      const op0 = o.b[pi];
+      const op1 = o.b[pi + 1];
+      if (Math.max(op0 - bp1, bp0 - op1) < gap - EPS) add(os0 - gap - len, os1 + gap);
+      if (m > 0 && zp0 < op1 - EPS && op0 < zp1 - EPS) add(os0 - len, os1);
+      const oz = o.zone;
+      if (oz && bp0 < oz[pi + 1] - EPS && oz[pi] < bp1 - EPS) add(oz[si] - len, oz[si + 1]);
+    }
+    return out;
+  }
+
+  /**
    * 벽 wall 의 fromEnd 쪽 모서리에서 재어, 그 벽에 앞으로 놓일 가구가 시작할 수 있는 가장 가까운 거리.
    * 모서리부터 이미 가구가 빈틈없이(가장 짧은 남은 가구도 못 들어가게) 차 있으면 그만큼 멀어진다.
    */
@@ -339,9 +411,10 @@ function runSearch(room, items, gap, { margin, rank, levels, order, random, dead
     // 벽을 고르는 순서. 기본 시점에서 잘 보이는 안쪽 두 벽(A, B)을 먼저 채우고, 모자라면 나머지(C, D)를 쓴다.
     // 같은 묶음 안에서는 남은 길이가 긴 벽부터.
     let wallOrder = [0, 1, 2, 3];
-    const first = count === 0;
+    const first = count === 0 && F === 0;
     if (first) {
       // 방은 좌우·앞뒤로 뒤집어도 같은 문제이므로, 맨 처음 가구는 벽 A·B 의 작은 좌표 쪽 끝에만 놓아 본다.
+      // (고정된 가구가 있으면 뒤집은 방이 같은 문제가 아니므로 이렇게 줄이지 않는다.)
       wallOrder = [0, 1];
     } else if (random) {
       shuffle(wallOrder, random);
@@ -398,6 +471,10 @@ function runSearch(room, items, gap, { margin, rank, levels, order, random, dead
               }
               if (extraStarts.size) starts = [0, ...[...extraStarts].sort((a, b) => a - b)];
             }
+          }
+          if (F > 0) {
+            const beyond = fixedStarts(wall, fromEnd, len, dep, m, baseDist);
+            if (beyond.length) starts = [...new Set([...starts, ...beyond])].sort((a, b) => a - b);
           }
           for (const start of starts) {
             const t = start === 0 ? base : findSpot(wall, fromEnd, len, dep, m, start);

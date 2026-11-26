@@ -4,9 +4,10 @@
 import { solve, seededRandom } from './solver.js';
 
 self.onmessage = (e) => {
-  const { room, items, gap, margin, timeLimitMs, seed } = e.data;
+  const { room, items, gap, margin, fixed, timeLimitMs, seed } = e.data;
   const result = solve(room, items, gap, {
     margin,
+    fixed,
     timeLimitMs,
     random: seed == null ? null : seededRandom(seed),
     onProgress: (partial) => self.postMessage({ type: 'progress', result: partial }),

@@ -1136,6 +1136,7 @@ body.editing #toast-root {
 }
 
 .dim-label,
+.lock-pin,
 .tag {
   position: absolute;
   top: 0;
@@ -1184,6 +1185,29 @@ body.editing #toast-root {
 .tag > span {
   color: var(--muted);
   font-size: 12.5px;
+}
+
+/* 위치를 고정한 가구 위에 뜨는 자물쇠 표시 */
+.lock-pin {
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  pointer-events: none;
+}
+
+.tag > .tag-lock {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .tag-actions {

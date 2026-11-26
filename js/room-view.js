@@ -24,6 +24,8 @@ export class RoomView {
    *   onBlockedEdit?: () => void,      // 읽기 전용인데 가구를 끌려고 했을 때
    *   onMove?: (id: string, x: number, z: number, rot: number, displaced: string[]) => void,
    *   onStash?: (id: string) => void,
+ *   onToggleLock?: (id: string) => void, // 이름표의 "위치 고정 / 고정 해제" 버튼
+ *   onLockedDrag?: (item: object) => void, // 위치를 고정한 가구를 끌려고 했을 때
    *   isOverInventory?: (clientX: number, clientY: number) => boolean,
    *   onInventoryHover?: (over: boolean) => void,
    *   onPlainWheel?: () => void,
@@ -39,6 +41,7 @@ export class RoomView {
     this.pickables = [];
     this.selectedId = null;
     this.marked = new Set();
+    this.pins = new Map(); // 위치를 고정한 가구 id → 가구 위에 뜨는 자물쇠 표시
     // 손으로 옮길 때 지킬 규칙. 켜져 있으면 그 규칙을 어기는 자리로는 가구가 들어가지 못한다.
     this.enforce = { gap: true, margin: true };
 
@@ -232,12 +235,21 @@ export class RoomView {
     this.groups.clear();
     this.pickables = [];
     this.marked.clear();
+    for (const pin of this.pins.values()) pin.remove();
+    this.pins.clear();
     for (const item of this.items) {
       if (!item.placed) continue;
       const group = this.makeItemGroup(item);
       this.itemGroup.add(group);
       this.groups.set(item.id, group);
       this.pickables.push(group.userData.box);
+      if (item.locked) {
+        const pin = document.createElement('div');
+        pin.className = 'lock-pin';
+        pin.innerHTML = LOCK_ICON;
+        this.container.appendChild(pin);
+        this.pins.set(item.id, pin);
+      }
     }
     this.styleItems();
   }
@@ -280,6 +292,11 @@ export class RoomView {
   /** 이 가구를 뺀, 방에 놓인 가구들의 자리와 방향. */
   othersOf(selfId) {
     return this.items.filter((o) => o.placed && o.id !== selfId).map((o) => ({ rect: rectOf(o), rot: wallOf(o), clear: o.clear !== false }));
+  }
+
+  /** 이 가구를 뺀, 위치를 고정한 가구들의 자리. 다른 가구는 이 자리로 들어갈 수 없다(겹치면 밀려나는 대신 막힌다). */
+  lockedRects(selfId) {
+    return this.items.filter((o) => o.placed && o.locked && o.id !== selfId).map(rectOf);
   }
 
   markDisplaced(ids) {
@@ -427,6 +444,13 @@ export class RoomView {
     place(this.dimW, this.toScreen(w / 2, 0, d), 'translate(-50%, 6px)');
     place(this.dimD, this.toScreen(w, 0, d / 2), 'translate(-50%, 6px)');
 
+    for (const [id, pin] of this.pins) {
+      const group = this.groups.get(id);
+      // 고른 가구는 이름표에 고정 여부가 나오므로 자물쇠 표시를 숨긴다.
+      if (!group || id === this.selectedId) pin.style.visibility = 'hidden';
+      else place(pin, this.toScreen(group.position.x, group.userData.h, group.position.z), 'translate(-50%, -50%)');
+    }
+
     if (!this.tag.hidden) {
       const group = this.groups.get(this.selectedId);
       if (group) {
@@ -464,8 +488,18 @@ export class RoomView {
     const actions = document.createElement('div');
     actions.className = 'tag-actions';
     this.tag.append(name, dims);
+    if (item.locked) {
+      const state = document.createElement('span');
+      state.className = 'tag-lock';
+      state.innerHTML = LOCK_ICON;
+      state.append('위치 고정됨');
+      this.tag.append(state);
+    }
     if (!this.cb.isReadOnly?.()) {
-      actions.append(tagButton('인벤토리로', () => this.cb.onStash?.(item.id)));
+      actions.append(
+        tagButton(item.locked ? '고정 해제' : '위치 고정', () => this.cb.onToggleLock?.(item.id)),
+        tagButton('인벤토리로', () => this.cb.onStash?.(item.id)),
+      );
       this.tag.append(actions);
     }
     this.tag.hidden = false;
@@ -633,6 +667,14 @@ export class RoomView {
         this.cb.onBlockedEdit?.();
         return;
       }
+      const pressed = this.items.find((it) => it.id === g.id);
+      if (pressed?.locked) {
+        // 위치를 고정한 가구: 움직이지 않고, 고정을 풀 수 있게 이름표를 띄운다.
+        this.gesture = { type: 'blocked' };
+        this.select(pressed.id);
+        this.cb.onLockedDrag?.(pressed);
+        return;
+      }
       this.startItemDrag(g);
       g = this.gesture;
       if (!g) return;
@@ -755,13 +797,18 @@ export class RoomView {
   dragTo(g, rot, cx, cz, others, rules) {
     const f = footprint({ w: g.item.w, d: g.item.d, rot });
     const target = this.snapPosition(g.id, cx - f.sx / 2, cz - f.sz / 2, f.sx, f.sz);
-    const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules, g.item.clear !== false);
+    // 위치를 고정한 가구가 있는 자리는 규칙을 꺼도 들어갈 수 없다.
+    const solid = this.lockedRects(g.id);
+    const clearOfLocked = (x, z) => !solid.some((r) => rectsOverlap({ x, z, sx: f.sx, sz: f.sz }, r));
+    const allowed = (x, z) => clearOfLocked(x, z) && placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules, g.item.clear !== false);
     let next;
     if (allowed(target.x, target.z)) {
       next = target;
       g.free = false;
     } else if (g.free) {
-      next = target;
+      if (clearOfLocked(target.x, target.z)) next = target;
+      else if (rot !== g.rot) return false;
+      else next = slideToward({ x: g.x, z: g.z }, target, clearOfLocked);
     } else {
       let from = { x: g.x, z: g.z };
       if (rot !== g.rot) {
@@ -839,8 +886,12 @@ export class RoomView {
         const target = this.snapPosition(null, p.x - f.sx / 2, p.z - f.sz / 2, f.sx, f.sz);
         const others = this.othersOf(null);
         const rules = this.activeRules();
-        const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules, e.item.clear !== false);
+        // 위치를 고정한 가구가 있는 자리는 규칙을 꺼도 놓을 수 없다.
+        const solid = this.lockedRects(null);
+        const clearOfLocked = (x, z) => !solid.some((r) => rectsOverlap({ x, z, sx: f.sx, sz: f.sz }, r));
+        const allowed = (x, z) => clearOfLocked(x, z) && placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules, e.item.clear !== false);
         let next = target;
+        e.onLocked = !clearOfLocked(target.x, target.z);
         if (allowed(target.x, target.z)) {
           e.valid = true;
         } else if (e.valid && rot === e.rot) {
@@ -875,14 +926,14 @@ export class RoomView {
   }
 
   /**
-   * @returns {{x:number, z:number, rot:number, displaced:string[]} | {blocked:true} | null}
-   *   놓을 위치. 규칙에 막혀 놓을 수 없는 자리면 {blocked:true}, 화면 밖이면 null.
+   * @returns {{x:number, z:number, rot:number, displaced:string[]} | {blocked:true, locked:boolean} | null}
+   *   놓을 위치. 규칙에 막혀 놓을 수 없는 자리면 {blocked:true}(위치를 고정한 가구 위라면 locked 도 true), 화면 밖이면 null.
    */
   externalEnd(clientX, clientY) {
     const over = this.externalMove(clientX, clientY);
     const e = this.ext;
     let result = null;
-    if (e && over && e.visible) result = e.valid ? { x: e.x, z: e.z, rot: e.rot, displaced: e.displaced } : { blocked: true };
+    if (e && over && e.visible) result = e.valid ? { x: e.x, z: e.z, rot: e.rot, displaced: e.displaced } : { blocked: true, locked: !!e.onLocked };
     this.externalCancel();
     return result;
   }
@@ -922,6 +973,8 @@ export class RoomView {
     this.renderer.forceContextLoss?.();
     c.remove();
     this.tag.remove();
+    for (const pin of this.pins.values()) pin.remove();
+    this.pins.clear();
     this.dimW.remove();
     this.dimD.remove();
   }
@@ -934,6 +987,9 @@ export class RoomView {
 function quarterTurn(builtRot, rot) {
   return ((rot - builtRot) * Math.PI) / 2;
 }
+
+const LOCK_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
 
 function num(v) {
   return String(Math.round(v * 10) / 10);

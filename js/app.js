@@ -2,7 +2,7 @@
 
 import { db, save, uid, nextColor, saveBackup, readBackup, restoreBackup } from './store.js';
 import { solve, seededRandom } from './solver.js';
-import { rectOf, clamp } from './geom.js';
+import { rectOf, clamp, wallOf } from './geom.js';
 import { TransferError, LINK_PARAM, LONG_LINK_CHARS, buildExport, planMerge, toFileText, fromFileText, encodePayload, decodePayload, makeLink, extractPayload } from './transfer.js';
 
 // 안드로이드 앱(WebView) 안에서 열렸을 때만 있는 기능 모음. 브라우저에서는 null.
@@ -656,13 +656,15 @@ const SOLVE_LIMIT_MS = 30000;
 let activeSolve = null;
 
 /**
+ * @param {object[]} [opts.fixed] 지금 자리에 그대로 둘 가구(위치를 고정한 가구). items 는 이 가구들을 피해서 놓인다.
  * @returns {Promise<object|null>} 배치 결과. 사용자가 취소하면 null.
  *   화면을 떠나서 중단된 경우에는 끝나지 않는다(이어서 할 일이 없으므로).
  */
-function runSolver(room, items, { shuffle = false, gap = db.settings.gap, margin = db.settings.margin } = {}) {
+function runSolver(room, items, { shuffle = false, gap = db.settings.gap, margin = db.settings.margin, fixed = [] } = {}) {
   const job = {
     room,
     items: items.map(({ id, w, d, h: height, clear, priority }) => ({ id, w, d, h: height, clear: clear !== false, priority })),
+    fixed: fixed.map((it) => ({ x: it.x, z: it.z, w: it.w, d: it.d, rot: wallOf(it), clear: it.clear !== false })),
     gap,
     margin,
     timeLimitMs: SOLVE_LIMIT_MS,
@@ -724,7 +726,7 @@ function runSolver(room, items, { shuffle = false, gap = db.settings.gap, margin
       setTimeout(() => {
         if (settled) return;
         const random = job.seed == null ? null : seededRandom(job.seed);
-        finish(solve(job.room, job.items, job.gap, { margin: job.margin, timeLimitMs: 3000, random }));
+        finish(solve(job.room, job.items, job.gap, { margin: job.margin, fixed: job.fixed, timeLimitMs: 3000, random }));
       }, 30);
     };
 
@@ -823,7 +825,7 @@ async function openEditor(layout) {
       );
   const inventory = h('aside', { class: 'ed-inv' }, h('div', { class: 'inv-head' }, h('b', null, '인벤토리'), invCount, addBtn, h('small', null, '끌어서 방에 놓기')), invList);
   const undoBtn = h('button', { class: 'tool', type: 'button', disabled: true, title: '되돌리기', 'aria-label': '되돌리기', onclick: () => undo() }, icon('undo'), h('span', null, '되돌리기'));
-  const arrangeBtn = h('button', { class: 'tool', type: 'button', title: '가구를 벽면에 다시 자동 배치', 'aria-label': '자동 배치', onclick: () => rearrange() }, icon('shuffle'), h('span', null, '자동 배치'));
+  const arrangeBtn = h('button', { class: 'tool', type: 'button', title: '가구를 벽면에 다시 자동 배치(위치를 고정한 가구는 그대로 둠)', 'aria-label': '자동 배치', onclick: () => rearrange() }, icon('shuffle'), h('span', null, '자동 배치'));
   const saveBtn = h('button', { class: 'tool save', type: 'button', disabled: true, title: '변경한 배치를 저장', onclick: () => save() }, icon('check'), h('span', null, '저장하기'));
   const backBtn = h(
     'a',
@@ -940,7 +942,9 @@ async function openEditor(layout) {
   const stash = (ids) => {
     for (const id of ids) {
       const it = item(id);
-      if (it) Object.assign(it, { placed: false, aside: true });
+      if (!it) continue;
+      Object.assign(it, { placed: false, aside: true });
+      delete it.locked; // 방에서 나가면 고정도 풀린다
     }
   };
   const displacedToast = (ids) => {
@@ -994,18 +998,24 @@ async function openEditor(layout) {
 
   async function rearrange() {
     // 인벤토리에 빼 둔 가구(선택하지 않았거나 직접 보낸 것)는 건드리지 않는다.
-    const active = items.filter((it) => !it.aside);
-    if (!active.length) return toast('자동 배치할 가구가 없어요. 인벤토리의 가구를 방에 끌어다 놓으면 포함돼요.', 4000);
+    // 위치를 고정한 가구는 지금 자리에 그대로 두고, 나머지만 그 가구들을 피해서 다시 놓는다.
+    const fixed = items.filter((it) => it.placed && it.locked);
+    const active = items.filter((it) => !it.aside && !(it.placed && it.locked));
+    if (!active.length) {
+      return toast(fixed.length ? '방에 있는 가구가 모두 고정되어 있어요. 고정을 풀면 자동 배치에 포함돼요.' : '자동 배치할 가구가 없어요. 인벤토리의 가구를 방에 끌어다 놓으면 포함돼요.', 4000);
+    }
     arrangeBtn.disabled = true;
     // 이 배치도의 간격·앞 여유 공간으로 다시 배치한다.
     // (기기 설정과 다르면 읽기 전용이라 여기까지 오지 않으므로, 기기 설정과 같은 값이다.)
-    const result = await runSolver(room, active, { shuffle: true, ...rules });
+    const result = await runSolver(room, active, { shuffle: true, ...rules, fixed });
     arrangeBtn.disabled = false;
     if (!result || destroyed) return;
     snapshot();
     applyPlacements(active, result);
     refresh();
-    showBanner(resultMessage(result, active.length));
+    const message = resultMessage(result, active.length);
+    if (fixed.length) message.text += ` 고정한 가구 ${fixed.length}개는 제자리에 두었어요.`;
+    showBanner(message);
   }
 
   let bannerTimer = 0;
@@ -1107,6 +1117,7 @@ async function openEditor(layout) {
       if (cancelled) return void view.externalCancel();
       const res = view.externalEnd(e.clientX, e.clientY);
       if (!res) return;
+      if (res.blocked && res.locked) return void toast('위치를 고정한 가구가 있는 자리에는 놓을 수 없어요.', 3500);
       if (res.blocked) return void toast('간격이나 앞 여유 공간 때문에 여기에는 놓을 수 없어요. 다른 자리에 놓거나, 위의 버튼으로 제한을 꺼 주세요.', 4500);
       snapshot();
       Object.assign(it, { placed: true, x: res.x, z: res.z, rot: res.rot });
@@ -1159,6 +1170,17 @@ async function openEditor(layout) {
         stash([id]);
         refresh();
       },
+      // 위치 고정: 고정한 가구는 끌어도 움직이지 않고, 자동 배치를 다시 해도 그 자리에 남는다.
+      onToggleLock(id) {
+        const it = item(id);
+        if (!it || !it.placed) return;
+        snapshot();
+        if (it.locked) delete it.locked;
+        else it.locked = true;
+        refresh();
+        toast(it.locked ? `'${it.name}'의 위치를 고정했어요. 자동 배치를 다시 해도 이 자리에 그대로 있어요.` : `'${it.name}'의 고정을 풀었어요.`, 3500);
+      },
+      onLockedDrag: (it) => toast(`'${it.name}'은(는) 위치가 고정되어 있어요. 옮기려면 '고정 해제'를 눌러 주세요.`, 3500),
     });
   } catch (err) {
     console.error(err);

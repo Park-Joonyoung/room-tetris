@@ -120,6 +120,7 @@ export function parseImport(raw) {
       if (it.clear === false) out.clear = false;
       if (priority(it.priority) !== undefined) out.priority = it.priority;
       if (it.aside === true && !out.placed) out.aside = true; // 자동 배치에서 빼 둔 인벤토리 가구
+      if (it.locked === true && out.placed) out.locked = true; // 위치를 고정한 가구(방에 놓인 것만)
       return out;
     });
     const createdAt = time(l.createdAt);
