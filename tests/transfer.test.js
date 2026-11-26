@@ -208,3 +208,21 @@ test('간격·앞 여유 공간 값이 없거나 이상하면 비워 둔다(받�
     assert.equal('gap' in out, false, String(bad));
   }
 });
+
+test('가구 높이 0(방 높이에 맞춤)은 그대로 옮겨지고, 배치도 안의 가구 높이 0 은 거절한다', async () => {
+  const db = sampleDb();
+  db.furniture.push(furniture('f9', '붙박이장', 5, { h: 0 }));
+  const back = await decodePayload(await encodePayload(buildExport(db)));
+  assert.equal(back.furniture.find((f) => f.id === 'f9').h, 0);
+  assert.equal(fromFileText(toFileText(buildExport(db))).furniture.find((f) => f.id === 'f9').h, 0);
+  // 가로·세로는 여전히 0 이 될 수 없다.
+  for (const key of ['w', 'd']) {
+    const d = structuredClone(buildExport(db));
+    d.furniture[0][key] = 0;
+    assert.throws(() => parseImport(d), TransferError, key);
+  }
+  // 배치도에 들어간 가구는 이미 방 높이로 정해져 있어야 한다.
+  const d = structuredClone(buildExport(db));
+  d.layouts[0].items[0].h = 0;
+  assert.throws(() => parseImport(d), TransferError);
+});

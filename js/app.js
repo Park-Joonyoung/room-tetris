@@ -58,7 +58,8 @@ function icon(name) {
 }
 
 const num = (v) => String(Math.round(v * 10) / 10);
-const dimsText = (o) => `${num(o.w)} × ${num(o.d)} × ${num(o.h)} cm`;
+// 가구의 높이 0 은 "배치도를 만들 때 방 높이에 맞춘다"는 뜻이다(천장까지 닿는 붙박이장 등).
+const dimsText = (o) => (o.h === 0 ? `${num(o.w)} × ${num(o.d)} cm × 높이 최대` : `${num(o.w)} × ${num(o.d)} × ${num(o.h)} cm`);
 const safeColor = (c) => (/^#[0-9a-f]{6}$/i.test(c || '') ? c : '#888888');
 
 function parseCm(text) {
@@ -138,12 +139,15 @@ function cmInput(value, placeholder) {
 }
 
 /** 가로·세로·높이 입력값을 읽어 검증한다. 잘못된 칸이 있으면 표시하고 null. */
-function readDims(inputs) {
+function readDims(inputs, { zeroHeight = false } = {}) {
   const out = {};
   let ok = true;
   for (const [key, input] of Object.entries(inputs)) {
     const v = parseCm(input.value);
-    const valid = v > 0 && v <= 5000;
+    // 가구의 높이만 0 을 받는다(방 높이에 맞춤). 그 밖의 값은 0 보다 커야 한다.
+    // 빈칸은 0 으로 읽히지 않게 따로 막는다.
+    const filled = input.value.trim() !== '';
+    const valid = filled && (v > 0 || (zeroHeight && key === 'h' && v === 0)) && v <= 5000;
     input.classList.toggle('invalid', !valid);
     if (!valid) ok = false;
     out[key] = v;
@@ -248,7 +252,7 @@ function renderFurniture(page) {
                 'button',
                 { class: 'card-main', type: 'button', onclick: () => openFurnitureForm(f, () => renderFurniture(page)) },
                 h('span', { class: 'swatch', style: { background: safeColor(f.color) } }),
-                h('span', { class: 'card-text' }, h('b', null, f.name), h('small', null, `가로 ${num(f.w)} · 세로 ${num(f.d)} · 높이 ${num(f.h)} cm`)),
+                h('span', { class: 'card-text' }, h('b', null, f.name), h('small', null, f.h === 0 ? `가로 ${num(f.w)} · 세로 ${num(f.d)} cm · 높이 최대(방 높이)` : `가로 ${num(f.w)} · 세로 ${num(f.d)} · 높이 ${num(f.h)} cm`)),
               ),
               h(
                 'button',
@@ -287,8 +291,8 @@ function openFurnitureForm(existing, onDone) {
         e.preventDefault();
         const nm = name.value.trim();
         name.classList.toggle('invalid', !nm);
-        const d = readDims(dims);
-        if (!nm || !d) return toast('이름과 크기(0보다 큰 숫자)를 확인해 주세요.');
+        const d = readDims(dims, { zeroHeight: true });
+        if (!nm || !d) return toast('이름과 크기를 확인해 주세요. 가로·세로는 0보다 커야 하고, 높이는 0(방 높이에 맞춤) 이상이어야 해요.', 4500);
         const updatedAt = Date.now(); // 다른 기기와 합칠 때 어느 쪽이 최신인지 판단하는 기준
         if (existing) Object.assign(existing, { name: nm, ...d, color: color.value, updatedAt });
         else db.furniture.push({ id: uid(), name: nm, ...d, color: color.value, updatedAt });
@@ -300,6 +304,7 @@ function openFurnitureForm(existing, onDone) {
     field('이름', name),
     h('div', { class: 'field-row' }, field('가로', dims.w, 'cm'), field('세로', dims.d, 'cm'), field('높이', dims.h, 'cm')),
     h('p', { class: 'hint' }, '가로는 벽을 따라 놓이는 길이, 세로는 벽에서 방 안쪽으로 나오는 깊이예요.'),
+    h('p', { class: 'hint' }, '높이에 0을 넣으면 배치도를 만들 때 그 방의 높이(최대)로 맞춰져요. 천장까지 닿는 가구에 쓰세요.'),
     h('label', { class: 'field color-field' }, h('span', { class: 'field-label' }, '색'), color, h('small', null, '배치도에서 이 색으로 표시돼요.')),
   );
   modal = openModal({
@@ -504,7 +509,8 @@ async function createLayout(draft) {
   const room = { w: draft.w, d: draft.d, h: draft.h };
   const items = db.furniture
     .filter((f) => draft.selected.has(f.id))
-    .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0 }));
+    // 높이 0 으로 등록한 가구는 이 방의 높이(놓을 수 있는 최대 높이)로 맞춘다.
+    .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h === 0 ? room.h : f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0 }));
   // 배치할 때 쓴 간격·앞 여유 공간을 배치도에 함께 적어 둔다.
   // 설정이 다른 기기에서 열어도 이 배치도는 같은 기준으로 보인다.
   const rules = { gap: db.settings.gap, margin: db.settings.margin };

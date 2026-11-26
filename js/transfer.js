@@ -45,6 +45,11 @@ function size(v, what) {
   return Math.round(v * 10) / 10;
 }
 
+/** 가구의 높이: 0 은 "배치도를 만들 때 방 높이에 맞춘다"는 뜻이라 허용한다. */
+function furnitureHeight(v) {
+  return v === 0 ? 0 : size(v, '가구 높이');
+}
+
 function coord(v) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
   return Math.min(Math.max(Math.round(v * 1000) / 1000, 0), MAX_CM);
@@ -80,7 +85,7 @@ export function parseImport(raw) {
       name: str(f.name, 30, '가구 이름'),
       w: size(f.w, '가구 가로'),
       d: size(f.d, '가구 세로'),
-      h: size(f.h, '가구 높이'),
+      h: furnitureHeight(f.h),
       color: color(f.color),
       updatedAt: time(f.updatedAt),
     };
