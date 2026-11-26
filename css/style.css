@@ -1378,6 +1378,44 @@ body.editing #toast-root {
   font-size: 14px;
 }
 
+.inv-add {
+  min-height: 32px;
+  padding: 0 10px 0 6px;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.inv-add .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.chip-note {
+  color: var(--accent) !important;
+  font-size: 12px !important;
+  font-weight: 600;
+}
+
+.chip-del {
+  width: 34px;
+  height: 34px;
+  margin: -4px -8px -4px auto;
+}
+
+.inv-head b {
+  white-space: nowrap;
+}
+
+.chip-del .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.chip-del:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .inv-head small {
   margin-left: auto;
   color: var(--muted);
@@ -1459,8 +1497,19 @@ body.editing #toast-root {
   }
 
   .inv-head {
+    flex-wrap: wrap;
     padding: 16px 16px 6px;
     font-size: 15px;
+  }
+
+  /* 옆 패널은 폭이 좁아서 안내 문구를 아랫줄로 내리고, 가구 추가 버튼을 오른쪽 끝에 둔다 */
+  .inv-add {
+    margin-left: auto;
+  }
+
+  .inv-head small {
+    flex-basis: 100%;
+    margin-left: 0;
   }
 
   .inv-list {

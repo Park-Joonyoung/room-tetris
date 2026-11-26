@@ -309,7 +309,15 @@ function renderFurniture(page) {
   );
 }
 
-function openFurnitureForm(existing, onDone) {
+/**
+ * 가구 만들기/고치기 양식.
+ * local 을 주면 가구 관리 목록에는 넣지 않고, 입력한 내용만 local.onCreate 로 넘긴다
+ * (배치도 편집 화면에서 그 배치도에만 있는 가구를 만들 때).
+ * @param {object|null} existing 고칠 가구(없으면 새로 만들기)
+ * @param {() => void} onDone
+ * @param {{colors: string[], onCreate: (record: object) => void} | null} [local]
+ */
+function openFurnitureForm(existing, onDone, local = null) {
   const name = h('input', { type: 'text', class: 'input', value: existing?.name ?? '', placeholder: '예: 침대', maxLength: 30, autocomplete: 'off' });
   const dims = { w: cmInput(existing?.w, '예: 200'), d: cmInput(existing?.d, '예: 100'), h: cmInput(existing?.h, '예: 45') };
   const clearBox = h('input', { type: 'checkbox', checked: existing ? existing.clear !== false : true });
@@ -321,7 +329,7 @@ function openFurnitureForm(existing, onDone) {
     priorityField.hidden = !priorityBox.checked;
     if (priorityBox.checked) priorityInput.focus();
   });
-  const color = h('input', { type: 'color', class: 'color-input', value: safeColor(existing?.color ?? nextColor(db.furniture.map((f) => f.color))) });
+  const color = h('input', { type: 'color', class: 'color-input', value: safeColor(existing?.color ?? nextColor(local ? local.colors : db.furniture.map((f) => f.color))) });
   let modal;
   const form = h(
     'form',
@@ -337,15 +345,21 @@ function openFurnitureForm(existing, onDone) {
         if (!nm || !d) return toast('이름과 크기를 확인해 주세요. 가로·세로는 0보다 커야 하고, 높이는 0(방 높이에 맞춤) 이상이어야 해요.', 4500);
         // 우선순위: 체크했을 때만 읽는다. 1~99 의 정수여야 한다.
         let priority = null;
-        if (priorityBox.checked) {
+        if (!local && priorityBox.checked) {
           const text = priorityInput.value.trim();
           priority = /^\d{1,2}$/.test(text) ? Number(text) : NaN;
           const ok = priority >= 1 && priority <= 99;
           priorityInput.classList.toggle('invalid', !ok);
           if (!ok) return toast('우선순위는 1부터 99까지의 정수로 적어 주세요.');
         }
-        const updatedAt = Date.now(); // 다른 기기와 합칠 때 어느 쪽이 최신인지 판단하는 기준
         const needsClear = clearBox.checked;
+        if (local) {
+          // 이 배치도에만 있는 가구: 가구 관리 목록은 건드리지 않는다.
+          local.onCreate({ name: nm, ...d, color: color.value, clear: needsClear });
+          modal.close();
+          return;
+        }
+        const updatedAt = Date.now(); // 다른 기기와 합칠 때 어느 쪽이 최신인지 판단하는 기준
         let changedLayouts = 0;
         if (existing) {
           const before = existing.clear !== false;
@@ -365,22 +379,24 @@ function openFurnitureForm(existing, onDone) {
         onDone();
       },
     },
+    local ? h('p', { class: 'hint' }, '여기서 만든 가구는 이 배치도에만 있어요. 가구 관리 목록에는 추가되지 않고, 만들면 인벤토리에 들어가요.') : null,
     field('이름', name),
     h('div', { class: 'field-row' }, field('가로', dims.w, 'cm'), field('세로', dims.d, 'cm'), field('높이', dims.h, 'cm')),
     h('p', { class: 'hint' }, '가로는 벽을 따라 놓이는 길이, 세로는 벽에서 방 안쪽으로 나오는 깊이예요.'),
-    h('p', { class: 'hint' }, '높이에 0을 넣으면 배치도를 만들 때 그 방의 높이(최대)로 맞춰져요. 천장까지 닿는 가구에 쓰세요.'),
+    h('p', { class: 'hint' }, local ? '높이에 0을 넣으면 이 방의 높이(최대)로 맞춰져요. 천장까지 닿는 가구에 쓰세요.' : '높이에 0을 넣으면 배치도를 만들 때 그 방의 높이(최대)로 맞춰져요. 천장까지 닿는 가구에 쓰세요.'),
     h('label', { class: 'field color-field' }, h('span', { class: 'field-label' }, '색'), color, h('small', null, '배치도에서 이 색으로 표시돼요.')),
     h('label', { class: 'switch-row' }, clearBox, h('span', null, h('b', null, '앞 여유 공간 적용'), h('small', null, '끄면 이 가구 앞에는 자리를 비워 두지 않아요. 침대나 문처럼 앞에 설 자리가 필요 없는 가구에 쓰세요.'))),
     existing ? h('p', { class: 'hint' }, '이 설정을 바꾸면 이 가구가 들어 있는 기존 배치도에도 함께 반영돼요.') : null,
-    h('label', { class: 'switch-row' }, priorityBox, h('span', null, h('b', null, '우선순위 설정'), h('small', null, '배치도를 만들 때 우선순위가 높은 가구부터 놓아요. 자리가 모자라면 우선순위가 높은 가구가 먼저 들어가요. 설정하지 않은 가구는 그다음이에요.'))),
-    priorityField,
+    // 우선순위는 가구 관리의 가구에만 둔다(배치도 안에서 만든 가구는 직접 놓으므로 필요 없다).
+    local ? null : h('label', { class: 'switch-row' }, priorityBox, h('span', null, h('b', null, '우선순위 설정'), h('small', null, '배치도를 만들 때 우선순위가 높은 가구부터 놓아요. 자리가 모자라면 우선순위가 높은 가구가 먼저 들어가요. 설정하지 않은 가구는 그다음이에요.'))),
+    local ? null : priorityField,
   );
   modal = openModal({
-    title: existing ? '가구 수정' : '가구 생성',
+    title: local ? '이 배치도에 가구 추가' : existing ? '가구 수정' : '가구 생성',
     body: form,
     footer: [
       h('button', { class: 'btn', type: 'button', onclick: () => modal.close() }, '취소'),
-      h('button', { class: 'btn primary', type: 'submit', form: 'furniture-form' }, existing ? '저장' : '생성'),
+      h('button', { class: 'btn primary', type: 'submit', form: 'furniture-form' }, local ? '추가' : existing ? '저장' : '생성'),
     ],
   });
 }
@@ -768,7 +784,44 @@ async function openEditor(layout) {
   const banner = h('div', { class: 'ed-banner', hidden: true });
   const invList = h('div', { class: 'inv-list' });
   const invCount = h('span', { class: 'badge' });
-  const inventory = h('aside', { class: 'ed-inv' }, h('div', { class: 'inv-head' }, h('b', null, '인벤토리'), invCount, h('small', null, '끌어서 방에 놓기')), invList);
+  // 이 배치도에만 있는 가구를 바로 만든다. 만든 가구는 인벤토리에 들어가고, 가구 관리 목록에는 생기지 않는다.
+  const addBtn = readOnly
+    ? null
+    : h(
+        'button',
+        {
+          class: 'btn small inv-add',
+          type: 'button',
+          title: '이 배치도에만 있는 가구 만들기',
+          onclick: () =>
+            openFurnitureForm(null, () => {}, {
+              colors: items.map((it) => it.color),
+              onCreate(rec) {
+                snapshot();
+                items.push({
+                  id: uid(),
+                  fid: '', // 가구 관리 목록에 없는, 이 배치도 전용 가구
+                  name: rec.name,
+                  w: rec.w,
+                  d: rec.d,
+                  h: rec.h === 0 ? room.h : rec.h,
+                  color: rec.color,
+                  placed: false,
+                  x: 0,
+                  z: 0,
+                  rot: 0,
+                  aside: true, // 직접 방에 놓을 때까지 자동 배치에서 빠진다
+                  ...(rec.clear ? {} : { clear: false }),
+                });
+                refresh();
+                toast(`'${rec.name}'을(를) 인벤토리에 추가했어요. 방으로 끌어다 놓으세요.`, 3500);
+              },
+            }),
+        },
+        icon('plus'),
+        '가구 추가',
+      );
+  const inventory = h('aside', { class: 'ed-inv' }, h('div', { class: 'inv-head' }, h('b', null, '인벤토리'), invCount, addBtn, h('small', null, '끌어서 방에 놓기')), invList);
   const undoBtn = h('button', { class: 'tool', type: 'button', disabled: true, title: '되돌리기', 'aria-label': '되돌리기', onclick: () => undo() }, icon('undo'), h('span', null, '되돌리기'));
   const arrangeBtn = h('button', { class: 'tool', type: 'button', title: '가구를 벽면에 다시 자동 배치', 'aria-label': '자동 배치', onclick: () => rearrange() }, icon('shuffle'), h('span', null, '자동 배치'));
   const saveBtn = h('button', { class: 'tool save', type: 'button', disabled: true, title: '변경한 배치를 저장', onclick: () => save() }, icon('check'), h('span', null, '저장하기'));
@@ -970,11 +1023,32 @@ async function openEditor(layout) {
     invList.replaceChildren(
       ...(stored.length
         ? stored.map((it) => {
+            const localOnly = !it.fid; // 이 배치도 안에서 만든 가구
             const chip = h(
               'div',
               { class: 'chip', title: '방으로 끌어다 놓으세요' },
               h('span', { class: 'swatch', style: { background: safeColor(it.color) } }),
-              h('span', { class: 'card-text' }, h('b', null, it.name), h('small', null, dimsText(it))),
+              h('span', { class: 'card-text' }, h('b', null, it.name), h('small', null, dimsText(it)), localOnly ? h('small', { class: 'chip-note' }, '이 배치도 전용') : null),
+              // 이 배치도 전용 가구는 다른 곳에 원본이 없으니 여기서 지울 수 있게 한다.
+              localOnly && !readOnly
+                ? h(
+                    'button',
+                    {
+                      class: 'icon-btn chip-del',
+                      type: 'button',
+                      'aria-label': `${it.name} 삭제`,
+                      title: '이 가구 삭제',
+                      onpointerdown: (e) => e.stopPropagation(), // 삭제 버튼을 누를 때 가구 끌기가 시작되지 않게
+                      onclick: () => {
+                        snapshot();
+                        items = items.filter((x) => x.id !== it.id);
+                        refresh();
+                        toast(`'${it.name}'을(를) 삭제했어요. 되돌리기로 복구할 수 있어요.`, 3500);
+                      },
+                    },
+                    icon('trash'),
+                  )
+                : null,
             );
             bindChipDrag(chip, it);
             return chip;
