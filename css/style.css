@@ -746,6 +746,34 @@ a {
   margin-left: 6px;
 }
 
+.badge.accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.priority-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: -4px;
+  padding-left: 46px;
+}
+
+.priority-field .field-box {
+  width: 84px;
+  flex: none;
+}
+
+.priority-field .input {
+  text-align: center;
+  font-weight: 700;
+}
+
+.priority-field small {
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
 .steps {
   color: var(--muted);
   font-size: 13.5px;

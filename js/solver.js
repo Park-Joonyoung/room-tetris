@@ -18,6 +18,11 @@
 //   맞물리는 경우도 찾는다. 앞 공간이 간격보다 크면 두 벽의 가구가 모서리를 비우고 서로 비켜서야
 //   할 때가 있어서, 아직 안 놓은 가구의 깊이만큼 미리 띄운 자리도 후보로 시도한다.
 //   전부 놓을 수 없으면 (놓은 개수, 놓은 부피) 가 가장 큰 배치를 돌려준다.
+//
+// 우선순위
+//   가구에 우선순위(1~99, 작을수록 먼저)를 줄 수 있다. 우선순위가 높은 가구부터 놓아 보고,
+//   자리가 모자랄 때도 높은 우선순위의 가구를 먼저 챙긴다: 우선순위 1 인 가구를 가장 많이 놓는 배치,
+//   그중에서 우선순위 2 를 가장 많이 놓는 배치, … 순으로 고른다. 우선순위가 없는 가구는 맨 뒤다.
 
 const EPS = 1e-6;
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -27,7 +32,8 @@ export const DEFAULT_TIME_LIMIT_MS = 30000;
 
 /**
  * @param {{w:number,d:number,h:number}} room
- * @param {{id:string,w:number,d:number,h:number,clear?:boolean}[]} items clear === false 면 앞 여유 공간이 필요 없는 가구
+ * @param {{id:string,w:number,d:number,h:number,clear?:boolean,priority?:number}[]} items
+ *   clear === false 면 앞 여유 공간이 필요 없는 가구. priority 는 1~99 의 정수(작을수록 먼저), 없으면 맨 뒤.
  * @param {number} gap 가구 사이 간격(cm)
  * @param {{
  *   margin?: number,                 // 가구 앞 여유 공간(cm)
@@ -42,7 +48,14 @@ export function solve(room, items, gap = 0, opts = {}) {
   const { timeLimitMs = DEFAULT_TIME_LIMIT_MS, random = null, onProgress = null } = opts;
   gap = Math.max(0, gap);
   const margin = Math.max(0, opts.margin || 0);
-  const best = { count: -1, volume: -1, place: null, dirty: false, reportedAt: 0 };
+  // tally: 우선순위 등급별로 놓은 가구 수(높은 등급부터). 이 값이 사전식으로 큰 배치가 더 좋은 배치다.
+  const best = { tally: null, volume: -1, place: null, dirty: false, reportedAt: 0 };
+
+  // 우선순위를 등급 번호(0 이 가장 높음)로 바꾼다. 우선순위가 없는 가구는 마지막 등급.
+  const prio = items.map((it) => (Number.isInteger(it.priority) && it.priority >= 1 && it.priority <= 99 ? it.priority : Infinity));
+  const distinct = [...new Set(prio)].sort((a, b) => a - b);
+  const rank = prio.map((p) => distinct.indexOf(p));
+  const levels = Math.max(1, distinct.length);
   const report = onProgress
     ? () => {
         best.dirty = false;
@@ -58,7 +71,7 @@ export function solve(room, items, gap = 0, opts = {}) {
   let timedOut = false;
   search: for (;;) {
     for (const order of ['big', 'small']) {
-      const res = runSearch(room, items, gap, { margin, order, random, deadline: Math.min(end, now() + slice), best, report });
+      const res = runSearch(room, items, gap, { margin, rank, levels, order, random, deadline: Math.min(end, now() + slice), best, report });
       timedOut = res.timedOut;
       // 시간 안에 끝났다면 모든 경우를 다 봤거나 놓을 수 있는 가구를 전부 놓은 것이므로 더 좋은 답은 없다.
       if (!res.timedOut || now() >= end) break search;
@@ -83,7 +96,7 @@ function round(v) {
   return Math.round(v * 1000) / 1000;
 }
 
-function runSearch(room, items, gap, { margin, order, random, deadline, best, report }) {
+function runSearch(room, items, gap, { margin, rank, levels, order, random, deadline, best, report }) {
   const n = items.length;
   const W = room.w;
   const D = room.d;
@@ -103,7 +116,7 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
 
   const placeable = walls.filter((w) => w.length > 0).length;
   const vol = items.map((it) => it.w * it.d * it.h);
-  const sig = items.map((it) => `${it.w}|${it.d}|${it.h}|${it.clear === false ? 0 : 1}`);
+  const sig = items.map((it, i) => `${it.w}|${it.d}|${it.h}|${it.clear === false ? 0 : 1}|${rank[i]}`);
 
   const idx = items.map((_, i) => i).filter((i) => walls[i].length > 0);
   const byLen = [...idx].sort((a, b) => items[a].w - items[b].w);
@@ -112,6 +125,10 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
   if (order === 'small') itemOrder = byLen; // 작은 것부터 채우면 놓는 개수가 많아진다
   else if (random) itemOrder = shuffle([...idx], random);
   else itemOrder = [...idx].sort((a, b) => items[b].w - items[a].w || vol[b] - vol[a]);
+  // 어떤 순서든 우선순위가 높은 가구를 먼저 놓아 본다(같은 등급 안에서는 위에서 정한 순서).
+  itemOrder = [...itemOrder].sort((a, b) => rank[a] - rank[b]);
+  // 등급별로, 벽을 따라 짧은 가구부터(가지치기의 상한 계산에 쓴다)
+  const byLenAt = Array.from({ length: levels }, (_, lv) => byLen.filter((i) => rank[i] === lv));
 
   // 놓인 가구들: 몸체 b 와 앞 공간 zone 을 [x0, x1, z0, z1] 로 적어 둔다(앞 공간이 없으면 zone 은 null).
   const placed = [];
@@ -119,6 +136,16 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
   const place = new Array(n).fill(null);
   let count = 0;
   let volume = 0;
+  const tally = new Array(levels).fill(0); // 등급별로 지금 놓여 있는 가구 수
+
+  /** 지금 배치가 지금까지의 최고 기록보다 좋은가: 높은 등급부터 놓은 수를 비교하고, 다 같으면 부피. */
+  function isBetter() {
+    if (!best.tally) return true;
+    for (let lv = 0; lv < levels; lv++) {
+      if (tally[lv] !== best.tally[lv]) return tally[lv] > best.tally[lv];
+    }
+    return volume > best.volume + EPS;
+  }
   let nodes = 0;
   let timedOut = false;
   let done = false;
@@ -249,8 +276,8 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
     }
     if (timedOut) return;
 
-    if (count > best.count || (count === best.count && volume > best.volume + EPS)) {
-      best.count = count;
+    if (isBetter()) {
+      best.tally = tally.slice();
       best.volume = volume;
       best.place = place.map((p) => (p ? { ...p } : null));
       best.dirty = true;
@@ -260,29 +287,42 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
       return;
     }
 
-    // 가지치기: 남은 벽 길이로 최대 몇 개를 더 놓을 수 있는지 상한을 구한다.
-    let free = 0;
-    for (let w = 0; w < 4; w++) free += wallLen[w] + gap - used[w];
-    let extra = 0;
-    let need = 0;
-    for (let k = 0; k < byLen.length; k++) {
-      const i = byLen[k];
-      if (place[i]) continue;
-      need += items[i].w + gap;
-      if (need > free + EPS) break;
-      extra++;
-    }
-    if (count + extra < best.count) return;
-    if (count + extra === best.count) {
-      let volBound = volume;
-      let taken = 0;
-      for (let k = 0; k < byVol.length && taken < extra; k++) {
-        const i = byVol[k];
-        if (place[i]) continue;
-        volBound += vol[i];
-        taken++;
+    // 가지치기: 남은 벽 길이만 따져서 "아무리 잘 돼도 여기까지"인 상한을 구한다.
+    // 높은 등급부터, 그 등급의 짧은 가구 순으로 남은 길이에 채워 넣는다. 윗등급이 상한만큼 들어가려면
+    // 적어도 그 짧은 가구들만큼의 길이를 쓰므로, 남은 길이로 아랫등급의 상한을 이어서 구할 수 있다.
+    if (best.tally) {
+      let free = 0;
+      for (let w = 0; w < 4; w++) free += wallLen[w] + gap - used[w];
+      let need = 0;
+      let extra = 0;
+      let verdict = 0; // -1: 최고 기록을 넘을 수 없음, 1: 넘을 수도 있음, 0: 지금까지는 같음
+      for (let lv = 0; lv < levels && verdict === 0; lv++) {
+        let reach = tally[lv];
+        const list = byLenAt[lv];
+        for (let k = 0; k < list.length; k++) {
+          const i = list[k];
+          if (place[i]) continue;
+          if (need + items[i].w + gap > free + EPS) break;
+          need += items[i].w + gap;
+          reach++;
+          extra++;
+        }
+        if (reach < best.tally[lv]) verdict = -1;
+        else if (reach > best.tally[lv]) verdict = 1;
       }
-      if (volBound <= best.volume + EPS) return;
+      if (verdict === -1) return;
+      if (verdict === 0) {
+        // 등급별 개수는 최고 기록과 같아질 수 있을 뿐이다. 부피로도 못 넘으면 그만둔다.
+        let volBound = volume;
+        let taken = 0;
+        for (let k = 0; k < byVol.length && taken < extra; k++) {
+          const i = byVol[k];
+          if (place[i]) continue;
+          volBound += vol[i];
+          taken++;
+        }
+        if (volBound <= best.volume + EPS) return;
+      }
     }
 
     // 같은 상태를 다른 순서로 다시 만나면 건너뛴다.
@@ -371,11 +411,13 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
             used[wall] += len + gap;
             place[i] = { wall, t, x: sh.b[0], z: sh.b[2] };
             count++;
+            tally[rank[i]]++;
             volume += vol[i];
 
             dfs();
 
             volume -= vol[i];
+            tally[rank[i]]--;
             count--;
             place[i] = null;
             used[wall] -= len + gap;

@@ -60,6 +60,11 @@ function rule(v) {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 300 ? Math.round(v * 10) / 10 : undefined;
 }
 
+/** 가구의 우선순위: 1~99 의 정수만 인정한다. 그 밖의 값은 "설정 안 함"(undefined). */
+function priority(v) {
+  return Number.isInteger(v) && v >= 1 && v <= 99 ? v : undefined;
+}
+
 const time = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
 const color = (v) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : '#888888');
 
@@ -90,6 +95,7 @@ export function parseImport(raw) {
       updatedAt: time(f.updatedAt),
     };
     if (f.clear === false) out.clear = false; // 앞 여유 공간이 필요 없는 가구
+    if (priority(f.priority) !== undefined) out.priority = f.priority; // 배치 우선순위(작을수록 먼저)
     return out;
   });
 
@@ -112,6 +118,7 @@ export function parseImport(raw) {
         rot: it.rot === 2 || it.rot === 3 ? it.rot : it.rot ? 1 : 0, // 등을 댄 벽(0~3)
       };
       if (it.clear === false) out.clear = false;
+      if (priority(it.priority) !== undefined) out.priority = it.priority;
       if (it.aside === true && !out.placed) out.aside = true; // 자동 배치에서 빼 둔 인벤토리 가구
       return out;
     });

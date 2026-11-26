@@ -235,6 +235,12 @@ function route() {
 
 // ───────────────────────── 가구 관리 ─────────────────────────
 
+/** 가구의 배치 우선순위(1~99)를 적는다. null 이면 설정을 지운다. */
+function setPriority(target, value) {
+  if (value) target.priority = value;
+  else delete target.priority;
+}
+
 /** 가구(또는 배치도 안의 가구)에 앞 여유 공간이 필요한지 적는다. 필요하면 표시를 지우고, 필요 없으면 clear: false. */
 function setClear(target, needed) {
   if (needed) delete target.clear;
@@ -279,7 +285,7 @@ function renderFurniture(page) {
                 'button',
                 { class: 'card-main', type: 'button', onclick: () => openFurnitureForm(f, () => renderFurniture(page)) },
                 h('span', { class: 'swatch', style: { background: safeColor(f.color) } }),
-                h('span', { class: 'card-text' }, h('b', null, f.name), h('small', null, f.h === 0 ? `가로 ${num(f.w)} · 세로 ${num(f.d)} cm · 높이 최대(방 높이)` : `가로 ${num(f.w)} · 세로 ${num(f.d)} · 높이 ${num(f.h)} cm`, f.clear === false ? h('span', { class: 'badge' }, '앞 여유 공간 없음') : null)),
+                h('span', { class: 'card-text' }, h('b', null, f.name), h('small', null, f.h === 0 ? `가로 ${num(f.w)} · 세로 ${num(f.d)} cm · 높이 최대(방 높이)` : `가로 ${num(f.w)} · 세로 ${num(f.d)} · 높이 ${num(f.h)} cm`, f.clear === false ? h('span', { class: 'badge' }, '앞 여유 공간 없음') : null, f.priority ? h('span', { class: 'badge accent' }, `우선순위 ${f.priority}`) : null)),
               ),
               h(
                 'button',
@@ -307,6 +313,14 @@ function openFurnitureForm(existing, onDone) {
   const name = h('input', { type: 'text', class: 'input', value: existing?.name ?? '', placeholder: '예: 침대', maxLength: 30, autocomplete: 'off' });
   const dims = { w: cmInput(existing?.w, '예: 200'), d: cmInput(existing?.d, '예: 100'), h: cmInput(existing?.h, '예: 45') };
   const clearBox = h('input', { type: 'checkbox', checked: existing ? existing.clear !== false : true });
+  // 우선순위: 체크하면 1~99 를 적는 칸이 열린다(기본 1, 숫자가 작을수록 먼저 배치).
+  const priorityBox = h('input', { type: 'checkbox', checked: !!existing?.priority });
+  const priorityInput = h('input', { type: 'text', inputMode: 'numeric', class: 'input', value: String(existing?.priority ?? 1), maxLength: 2, autocomplete: 'off', 'aria-label': '우선순위(1~99)' });
+  const priorityField = h('div', { class: 'priority-field', hidden: !priorityBox.checked }, h('span', { class: 'field-box' }, priorityInput), h('small', null, '1부터 99까지. 숫자가 작을수록 먼저 배치돼요.'));
+  priorityBox.addEventListener('change', () => {
+    priorityField.hidden = !priorityBox.checked;
+    if (priorityBox.checked) priorityInput.focus();
+  });
   const color = h('input', { type: 'color', class: 'color-input', value: safeColor(existing?.color ?? nextColor(db.furniture.map((f) => f.color))) });
   let modal;
   const form = h(
@@ -321,6 +335,15 @@ function openFurnitureForm(existing, onDone) {
         name.classList.toggle('invalid', !nm);
         const d = readDims(dims, { zeroHeight: true });
         if (!nm || !d) return toast('이름과 크기를 확인해 주세요. 가로·세로는 0보다 커야 하고, 높이는 0(방 높이에 맞춤) 이상이어야 해요.', 4500);
+        // 우선순위: 체크했을 때만 읽는다. 1~99 의 정수여야 한다.
+        let priority = null;
+        if (priorityBox.checked) {
+          const text = priorityInput.value.trim();
+          priority = /^\d{1,2}$/.test(text) ? Number(text) : NaN;
+          const ok = priority >= 1 && priority <= 99;
+          priorityInput.classList.toggle('invalid', !ok);
+          if (!ok) return toast('우선순위는 1부터 99까지의 정수로 적어 주세요.');
+        }
         const updatedAt = Date.now(); // 다른 기기와 합칠 때 어느 쪽이 최신인지 판단하는 기준
         const needsClear = clearBox.checked;
         let changedLayouts = 0;
@@ -328,10 +351,12 @@ function openFurnitureForm(existing, onDone) {
           const before = existing.clear !== false;
           Object.assign(existing, { name: nm, ...d, color: color.value, updatedAt });
           setClear(existing, needsClear);
+          setPriority(existing, priority);
           if (before !== needsClear) changedLayouts = applyClearToLayouts(existing.id, needsClear, updatedAt);
         } else {
           const created = { id: uid(), name: nm, ...d, color: color.value, updatedAt };
           setClear(created, needsClear);
+          setPriority(created, priority);
           db.furniture.push(created);
         }
         persist();
@@ -347,6 +372,8 @@ function openFurnitureForm(existing, onDone) {
     h('label', { class: 'field color-field' }, h('span', { class: 'field-label' }, '색'), color, h('small', null, '배치도에서 이 색으로 표시돼요.')),
     h('label', { class: 'switch-row' }, clearBox, h('span', null, h('b', null, '앞 여유 공간 적용'), h('small', null, '끄면 이 가구 앞에는 자리를 비워 두지 않아요. 침대나 문처럼 앞에 설 자리가 필요 없는 가구에 쓰세요.'))),
     existing ? h('p', { class: 'hint' }, '이 설정을 바꾸면 이 가구가 들어 있는 기존 배치도에도 함께 반영돼요.') : null,
+    h('label', { class: 'switch-row' }, priorityBox, h('span', null, h('b', null, '우선순위 설정'), h('small', null, '배치도를 만들 때 우선순위가 높은 가구부터 놓아요. 자리가 모자라면 우선순위가 높은 가구가 먼저 들어가요. 설정하지 않은 가구는 그다음이에요.'))),
+    priorityField,
   );
   modal = openModal({
     title: existing ? '가구 수정' : '가구 생성',
@@ -564,6 +591,7 @@ async function createLayout(draft) {
     z: 0,
     rot: 0,
     ...(f.clear === false ? { clear: false } : {}),
+    ...(f.priority ? { priority: f.priority } : {}),
     ...(draft.selected.has(f.id) ? {} : { aside: true }),
   }));
   const chosen = items.filter((it) => !it.aside);
@@ -618,7 +646,7 @@ let activeSolve = null;
 function runSolver(room, items, { shuffle = false, gap = db.settings.gap, margin = db.settings.margin } = {}) {
   const job = {
     room,
-    items: items.map(({ id, w, d, h: height, clear }) => ({ id, w, d, h: height, clear: clear !== false })),
+    items: items.map(({ id, w, d, h: height, clear, priority }) => ({ id, w, d, h: height, clear: clear !== false, priority })),
     gap,
     margin,
     timeLimitMs: SOLVE_LIMIT_MS,

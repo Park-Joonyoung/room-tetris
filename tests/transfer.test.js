@@ -255,3 +255,21 @@ test('자동 배치에서 빼 둔 인벤토리 가구 표시(aside)가 옮겨진
   d.layouts[0].items[0].aside = true;
   assert.equal('aside' in parseImport(d).layouts[0].items[0], false);
 });
+
+test('가구 우선순위(1~99 정수)가 옮겨지고, 이상한 값은 버린다', async () => {
+  const db = sampleDb();
+  db.furniture[0].priority = 1;
+  db.furniture[1].priority = 99;
+  db.layouts[0].items[0].priority = 7;
+  const back = await decodePayload(await encodePayload(buildExport(db)));
+  assert.deepEqual(back.furniture, db.furniture);
+  assert.deepEqual(back.layouts, db.layouts);
+  for (const bad of [0, 100, 2.5, '3', null, -1]) {
+    const d = structuredClone(buildExport(db));
+    d.furniture[0].priority = bad;
+    d.layouts[0].items[0].priority = bad;
+    const out = parseImport(d);
+    assert.equal('priority' in out.furniture[0], false, String(bad));
+    assert.equal('priority' in out.layouts[0].items[0], false, String(bad));
+  }
+});

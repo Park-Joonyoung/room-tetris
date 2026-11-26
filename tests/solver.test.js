@@ -362,3 +362,134 @@ test('작은 입력은 격자 전수 탐색과 같은 개수를 배치한다(네
     );
   }
 });
+
+// ───────────── 우선순위 ─────────────
+
+/** 우선순위 등급(작은 숫자가 먼저, 없으면 맨 뒤)별로 놓인 가구 수 */
+function tallyOf(items, placedIds) {
+  const key = (it) => (Number.isInteger(it.priority) ? it.priority : Infinity);
+  const levels = [...new Set(items.map(key))].sort((a, b) => a - b);
+  return levels.map((lv) => items.filter((it) => key(it) === lv && placedIds.has(it.id)).length);
+}
+
+function lexCompare(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+
+/** 격자 전수 탐색으로 구한 "가장 좋은 등급별 개수"(높은 등급부터 비교). 솔버와 무관한 구현. */
+function gridBestTally(room, items, gap, margin, step) {
+  const n = items.length;
+  let best = null;
+  const placed = [];
+  const chosen = new Set();
+  const rec = (i) => {
+    // 남은 가구를 전부 놓는다고 쳐도 최고 기록을 못 넘으면 그만둔다.
+    if (best) {
+      const optimistic = new Set(chosen);
+      for (let k = i; k < n; k++) optimistic.add(items[k].id);
+      if (lexCompare(tallyOf(items, optimistic), best) <= 0) return;
+    }
+    if (i === n) {
+      best = tallyOf(items, chosen);
+      return;
+    }
+    const it = items[i];
+    const m = frontNeed(it, margin);
+    if (it.h <= room.h) {
+      for (let wall = 0; wall < 4; wall++) {
+        const L = wall % 2 === 0 ? room.w : room.d;
+        for (let t = 0; t + it.w <= L; t += step) {
+          const cand = { r: rectOn(room, wall, t, it), wall, m };
+          if (!inside(room, cand.r) || (m > 0 && !inside(room, frontOf(cand.r, wall, m)))) continue;
+          if (!placed.every((o) => compatible(cand, o, gap))) continue;
+          placed.push(cand);
+          chosen.add(it.id);
+          rec(i + 1);
+          chosen.delete(it.id);
+          placed.pop();
+        }
+      }
+    }
+    rec(i + 1);
+  };
+  rec(0);
+  return best;
+}
+
+test('우선순위: 하나만 들어갈 때 우선순위가 높은(숫자가 작은) 가구가 들어간다', () => {
+  const room = { w: 300, d: 100, h: 240 };
+  const items = [mk('low', 280, 90, 100, { priority: 2 }), mk('high', 280, 90, 100, { priority: 1 })];
+  const r = solve(room, items, 5);
+  validate(room, items, 5, r);
+  assert.deepEqual(r.placements.map((p) => p.id), ['high']);
+  // 순서를 바꿔도 같다.
+  assert.deepEqual(solve(room, [items[1], items[0]], 5).placements.map((p) => p.id), ['high']);
+});
+
+test('우선순위: 우선순위가 높은 가구 하나가 우선순위 낮은 가구 여럿보다 먼저다', () => {
+  // 우선순위가 없을 때는 작은 것 셋을 놓지만(개수 최대화), big 에 우선순위를 주면 big 이 먼저 들어간다.
+  const room = { w: 300, d: 100, h: 240 };
+  const plain = [mk('big', 280, 90), mk('s1', 90, 90), mk('s2', 90, 90), mk('s3', 90, 90)];
+  assert.deepEqual(solve(room, plain, 5).unplaced, ['big']);
+  const ranked = [mk('big', 280, 90, 100, { priority: 1 }), ...plain.slice(1)];
+  const r = solve(room, ranked, 5);
+  validate(room, ranked, 5, r);
+  assert.ok(r.placements.some((p) => p.id === 'big'));
+  // 작은 것들에도 우선순위를 주되 big 보다 낮게 하면 여전히 big 이 먼저다.
+  const lower = [ranked[0], ...plain.slice(1).map((it) => ({ ...it, priority: 5 }))];
+  assert.ok(solve(room, lower, 5).placements.some((p) => p.id === 'big'));
+  // 작은 것들의 우선순위가 더 높으면 작은 것 셋이 들어간다.
+  const flipped = [{ ...plain[0], priority: 9 }, ...plain.slice(1).map((it) => ({ ...it, priority: 2 }))];
+  assert.deepEqual(solve(room, flipped, 5).unplaced, ['big']);
+});
+
+test('우선순위: 우선순위를 준 가구가 우선순위 없는 가구보다 먼저다', () => {
+  const room = { w: 300, d: 100, h: 240 };
+  const items = [mk('none', 280, 90), mk('p99', 280, 90, 100, { priority: 99 })];
+  assert.deepEqual(solve(room, items, 5).placements.map((p) => p.id), ['p99']);
+});
+
+test('우선순위: 범위를 벗어난 값은 우선순위가 없는 것으로 본다', () => {
+  const room = { w: 300, d: 100, h: 240 };
+  for (const bad of [0, 100, 1.5, '1', null]) {
+    const items = [mk('bad', 280, 90, 100, { priority: bad }), mk('p50', 280, 90, 100, { priority: 50 })];
+    assert.deepEqual(solve(room, items, 5).placements.map((p) => p.id), ['p50'], String(bad));
+  }
+});
+
+test('우선순위: 다 들어가면 우선순위와 상관없이 전부 배치한다', () => {
+  const room = { w: 500, d: 400, h: 240 };
+  const items = [mk('a', 200, 60, 100, { priority: 3 }), mk('b', 150, 60), mk('c', 100, 40, 100, { priority: 1 }), mk('d', 80, 40, 100, { priority: 1 })];
+  const r = solve(room, items, 5, { margin: 60 });
+  validate(room, items, 5, r, 60);
+  assert.equal(r.complete, true);
+});
+
+test('우선순위: 작은 입력에서 격자 전수 탐색과 같은 등급별 개수를 낸다', () => {
+  const rnd = lcg(2468);
+  const ten = (lo, hi) => 10 * (lo + Math.floor(rnd() * (hi - lo + 1)));
+  const prios = [undefined, undefined, 1, 2, 3];
+  for (let t = 0; t < 130; t++) {
+    const room = { w: ten(9, 20), d: ten(9, 20), h: 240 };
+    const n = 3 + Math.floor(rnd() * 2);
+    const items = Array.from({ length: n }, (_, i) => {
+      const extra = rnd() < 0.2 ? { clear: false } : {};
+      const priority = prios[Math.floor(rnd() * prios.length)];
+      if (priority) extra.priority = priority;
+      return mk(`i${i}`, ten(3, 14), ten(2, 8), 100, extra);
+    });
+    const gap = 10 * Math.floor(rnd() * 2);
+    const margin = t % 3 === 0 ? 0 : 20 * Math.floor(rnd() * 4);
+    const r = solve(room, items, gap, { margin, timeLimitMs: 8000 });
+    validate(room, items, gap, r, margin);
+    assert.equal(r.timedOut, false, `case ${t} 시간 초과`);
+    const got = tallyOf(items, new Set(r.placements.map((p) => p.id)));
+    const expected = gridBestTally(room, items, gap, margin, 10);
+    assert.deepEqual(
+      got,
+      expected,
+      `case ${t}: room ${room.w}x${room.d} gap=${gap} margin=${margin} items=${items.map((i) => `${i.w}x${i.d}p${i.priority ?? '-'}${i.clear === false ? '*' : ''}`).join(',')}`,
+    );
+  }
+});
