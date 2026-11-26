@@ -3,7 +3,7 @@
 // 데이터는 직접 바꾸지 않고 콜백(onMove, onStash)으로 알려 준다.
 
 import * as THREE from 'three';
-import { footprint, rectOf, rectsOverlap, wallFor, clamp } from './geom.js';
+import { footprint, rectOf, rectsOverlap, wallFor, clamp, placementAllowed, slideToward } from './geom.js';
 
 const DEG = Math.PI / 180;
 const DEFAULT_ELEVATION = 30 * DEG; // 맞은편 모서리의 살짝 위에서 내려다보는 각도
@@ -39,6 +39,8 @@ export class RoomView {
     this.pickables = [];
     this.selectedId = null;
     this.marked = new Set();
+    // 손으로 옮길 때 지킬 규칙. 켜져 있으면 그 규칙을 어기는 자리로는 가구가 들어가지 못한다.
+    this.enforce = { gap: true, margin: true };
 
     this.az = 0;
     this.el = DEFAULT_ELEVATION;
@@ -204,7 +206,7 @@ export class RoomView {
       zone = new THREE.Mesh(new THREE.PlaneGeometry(item.rot ? margin : sx, item.rot ? sz : margin), zoneMat);
       zone.rotation.x = -Math.PI / 2;
       zone.position.set(item.rot ? sx / 2 + margin / 2 : 0, 0.6, item.rot ? 0 : sz / 2 + margin / 2);
-      zone.visible = ghost;
+      zone.visible = ghost && this.enforce.margin;
       group.add(zone);
     }
 
@@ -233,7 +235,8 @@ export class RoomView {
     for (const [id, group] of this.groups) {
       const { box, edges, zone, baseEdge } = group.userData;
       const displaced = this.marked.has(id);
-      if (zone) zone.visible = id === this.selectedId; // 고른 가구의 앞 여유 공간만 보여 준다
+      // 앞 여유 공간: 평소에는 고른 가구 것만, 가구를 끄는 동안에는 어디가 막히는지 보이도록 전부 보여 준다.
+      if (zone) zone.visible = this.enforce.margin && (id === this.selectedId || this.isDragging());
       box.material.transparent = displaced;
       box.material.opacity = displaced ? 0.3 : 1;
       box.material.needsUpdate = true;
@@ -241,6 +244,30 @@ export class RoomView {
       else if (id === this.selectedId) edges.material.color.set(this.colors.select);
       else edges.material.color.copy(baseEdge);
     }
+  }
+
+  isDragging() {
+    return this.gesture?.type === 'drag' || !!this.ext;
+  }
+
+  /** 간격·앞 여유 공간 규칙을 켜고 끈다(편집 화면의 토글 버튼). */
+  setEnforce({ gap, margin }) {
+    this.enforce = { gap: !!gap, margin: !!margin };
+    this.styleItems();
+    this.invalidate();
+  }
+
+  /** 지금 적용 중인 규칙. 꺼진 규칙은 null. */
+  activeRules() {
+    return {
+      gap: this.enforce.gap ? Math.max(0, this.cb.getGap?.() ?? 0) : null,
+      margin: this.enforce.margin ? Math.max(0, this.cb.getMargin?.() ?? 0) : null,
+    };
+  }
+
+  /** 이 가구를 뺀, 방에 놓인 가구들의 자리와 방향. */
+  othersOf(selfId) {
+    return this.items.filter((o) => o.placed && o.id !== selfId).map((o) => ({ rect: rectOf(o), rot: o.rot ? 1 : 0 }));
   }
 
   markDisplaced(ids) {
@@ -454,7 +481,8 @@ export class RoomView {
   /** 방 안으로 가두고, 벽이나 다른 가구(간격 포함) 근처면 달라붙게 한다. */
   snapPosition(selfId, x, z, sx, sz) {
     const { w, d } = this.room;
-    const gap = Math.max(0, this.cb.getGap?.() ?? 0);
+    // 간격 규칙을 껐으면 간격 없이 딱 붙는 자리에 달라붙는다.
+    const gap = this.enforce.gap ? Math.max(0, this.cb.getGap?.() ?? 0) : 0;
     const maxX = Math.max(0, w - sx);
     const maxZ = Math.max(0, d - sz);
     x = clamp(x, 0, maxX);
@@ -670,8 +698,11 @@ export class RoomView {
       z: item.z,
       displaced: [],
       overInv: false,
+      // 처음부터 규칙에 어긋나 있던 가구는 맞는 자리에 닿을 때까지 자유롭게 움직인다(안 그러면 꺼낼 수가 없다).
+      free: !placementAllowed({ x: item.x, z: item.z, sx, sz }, rot, this.othersOf(item.id), this.room, this.activeRules()),
     };
     this.select(item.id);
+    this.styleItems();
     this.container.classList.add('is-dragging');
   }
 
@@ -684,13 +715,12 @@ export class RoomView {
       const cx = p.x - g.offX;
       const cz = p.z - g.offZ;
       // 가구는 가까운 벽을 따라 선다(가로가 벽 쪽). 다른 벽 쪽으로 끌고 가면 그 벽에 맞춰 돌아선다.
-      const rot = wallFor(g.item, this.room, cx, cz, g.rot);
-      if (rot !== null) {
-        g.rot = rot;
-        ({ sx: g.sx, sz: g.sz } = footprint({ w: g.item.w, d: g.item.d, rot }));
-        const pos = this.snapPosition(g.id, cx - g.sx / 2, cz - g.sz / 2, g.sx, g.sz);
-        g.x = pos.x;
-        g.z = pos.z;
+      const want = wallFor(g.item, this.room, cx, cz, g.rot);
+      if (want !== null) {
+        const others = this.othersOf(g.id);
+        const rules = this.activeRules();
+        // 돌아설 자리가 규칙에 막혀 있으면 지금 방향을 유지한 채로 움직인다.
+        if (!this.dragTo(g, want, cx, cz, others, rules) && want !== g.rot) this.dragTo(g, g.rot, cx, cz, others, rules);
       }
     }
     group.position.set(g.x + g.sx / 2, 0, g.z + g.sz / 2);
@@ -703,6 +733,37 @@ export class RoomView {
     g.displaced = overInv ? [] : this.overlapping(g.id, g.x, g.z, g.sx, g.sz);
     this.markDisplaced(g.displaced);
     this.invalidate();
+  }
+
+  /**
+   * 끌고 있는 가구를 중심 (cx, cz) 쪽으로, rot 방향으로 옮긴다.
+   * 그 자리가 규칙(간격·앞 여유 공간)에 맞으면 그대로 가고, 아니면 걸리는 데까지만 간다.
+   * @returns {boolean} false 면 그 방향으로는 설 수 없어서 아무것도 바꾸지 않은 것
+   */
+  dragTo(g, rot, cx, cz, others, rules) {
+    const f = footprint({ w: g.item.w, d: g.item.d, rot });
+    const target = this.snapPosition(g.id, cx - f.sx / 2, cz - f.sz / 2, f.sx, f.sz);
+    const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules);
+    let next;
+    if (allowed(target.x, target.z)) {
+      next = target;
+      g.free = false;
+    } else if (g.free) {
+      next = target;
+    } else {
+      let from = { x: g.x, z: g.z };
+      if (rot !== g.rot) {
+        // 방향이 바뀌면 가운데를 그대로 둔 채 새 크기로 선 자리에서 출발한다.
+        from = {
+          x: clamp(g.x + g.sx / 2 - f.sx / 2, 0, Math.max(0, this.room.w - f.sx)),
+          z: clamp(g.z + g.sz / 2 - f.sz / 2, 0, Math.max(0, this.room.d - f.sz)),
+        };
+        if (!allowed(from.x, from.z)) return false;
+      }
+      next = slideToward(from, target, allowed);
+    }
+    Object.assign(g, { rot, sx: f.sx, sz: f.sz, x: next.x, z: next.z });
+    return true;
   }
 
   finishItemDrag(g, clientX, clientY) {
@@ -723,6 +784,7 @@ export class RoomView {
     this.container.classList.remove('is-dragging');
     if (g.overInv) this.cb.onInventoryHover?.(false);
     this.markDisplaced([]);
+    this.styleItems(); // 끄는 동안 보여 주던 다른 가구들의 앞 여유 공간을 다시 숨긴다
     const group = this.groups.get(g.id);
     if (restore && group) {
       group.position.set(g.start.x + g.start.sx / 2, 0, g.start.z + g.start.sz / 2);
@@ -737,8 +799,9 @@ export class RoomView {
   externalStart(item) {
     this.externalCancel();
     if (wallFor(item, this.room, 0, 0) === null) return false;
-    this.ext = { item, rot: null, builtRot: 0, sx: 0, sz: 0, group: null, x: 0, z: 0, displaced: [], visible: false };
+    this.ext = { item, rot: null, builtRot: 0, sx: 0, sz: 0, group: null, x: 0, z: 0, displaced: [], visible: false, valid: false };
     this.select(null);
+    this.styleItems();
     return true;
   }
 
@@ -760,12 +823,22 @@ export class RoomView {
       // 놓으려는 곳에서 가까운 벽을 따라 서도록 방향을 정한다.
       const rot = wallFor(e.item, this.room, p.x, p.z, e.rot);
       if (rot !== null) {
-        e.rot = rot;
-        ({ sx: e.sx, sz: e.sz } = footprint({ w: e.item.w, d: e.item.d, rot }));
-        const pos = this.snapPosition(null, p.x - e.sx / 2, p.z - e.sz / 2, e.sx, e.sz);
-        e.x = pos.x;
-        e.z = pos.z;
-        e.visible = true;
+        const f = footprint({ w: e.item.w, d: e.item.d, rot });
+        const target = this.snapPosition(null, p.x - f.sx / 2, p.z - f.sz / 2, f.sx, f.sz);
+        const others = this.othersOf(null);
+        const rules = this.activeRules();
+        const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules);
+        let next = target;
+        if (allowed(target.x, target.z)) {
+          e.valid = true;
+        } else if (e.valid && rot === e.rot) {
+          // 놓을 수 있는 자리에 있다가 막힌 쪽으로 끌면, 걸리는 데까지만 따라간다.
+          next = slideToward({ x: e.x, z: e.z }, target, allowed);
+        } else {
+          // 아직 놓을 수 있는 자리를 찾지 못했다. 손가락 위치에 "못 놓음" 표시로 보여 준다.
+          e.valid = false;
+        }
+        Object.assign(e, { rot, sx: f.sx, sz: f.sz, x: next.x, z: next.z, visible: true });
       }
     }
     if (e.visible) {
@@ -777,18 +850,27 @@ export class RoomView {
       e.group.visible = true;
       e.group.position.set(e.x + e.sx / 2, 0, e.z + e.sz / 2);
       e.group.rotation.y = quarterTurn(e.builtRot, e.rot);
-      e.displaced = this.overlapping(null, e.x, e.z, e.sx, e.sz);
+      // 규칙 때문에 놓을 수 없는 자리면 흐리게, 빨간 테두리로 보여 준다.
+      const { box, edges, baseEdge } = e.group.userData;
+      box.material.opacity = e.valid ? 0.75 : 0.3;
+      if (e.valid) edges.material.color.copy(baseEdge);
+      else edges.material.color.set(this.colors.danger);
+      e.displaced = e.valid ? this.overlapping(null, e.x, e.z, e.sx, e.sz) : [];
       this.markDisplaced(e.displaced);
     }
     this.invalidate();
     return true;
   }
 
-  /** @returns {{x:number, z:number, rot:number, displaced:string[]} | null} 놓을 위치. 화면 밖이면 null */
+  /**
+   * @returns {{x:number, z:number, rot:number, displaced:string[]} | {blocked:true} | null}
+   *   놓을 위치. 규칙에 막혀 놓을 수 없는 자리면 {blocked:true}, 화면 밖이면 null.
+   */
   externalEnd(clientX, clientY) {
     const over = this.externalMove(clientX, clientY);
     const e = this.ext;
-    const result = e && over && e.visible ? { x: e.x, z: e.z, rot: e.rot, displaced: e.displaced } : null;
+    let result = null;
+    if (e && over && e.visible) result = e.valid ? { x: e.x, z: e.z, rot: e.rot, displaced: e.displaced } : { blocked: true };
     this.externalCancel();
     return result;
   }
@@ -802,6 +884,7 @@ export class RoomView {
       disposeChildren(e.group);
     }
     this.markDisplaced([]);
+    this.styleItems();
     this.invalidate();
   }
 

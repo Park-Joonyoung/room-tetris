@@ -1194,10 +1194,69 @@ body.editing #toast-root {
   opacity: 0;
 }
 
+/* 옮길 때 지킬 규칙(간격 / 앞 여유 공간) 토글 */
+.ed-rules {
+  position: absolute;
+  z-index: 4;
+  top: 10px;
+  left: max(10px, env(safe-area-inset-left));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+}
+
+.rule-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+}
+
+.rule-check {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1.5px solid var(--line);
+  border-radius: 6px;
+  color: transparent;
+}
+
+.rule-check .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.rule-toggle[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.rule-toggle[aria-pressed='true'] .rule-check {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.rule-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .ed-banner {
   position: absolute;
   z-index: 5;
-  top: 10px;
+  top: 56px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;

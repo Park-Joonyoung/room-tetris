@@ -693,7 +693,32 @@ async function openEditor(layout) {
     },
     icon('back'),
   );
-  const subtitle = h('small', null);
+  const subtitle = h('small', null, dimsText(room));
+
+  // 손으로 옮길 때 간격과 앞 여유 공간을 지킬지. 기본은 둘 다 켜짐이고, 끄면 그 제한 없이 움직인다.
+  const enforce = { gap: true, margin: true };
+  const ruleToggle = (key, label, value) => {
+    const button = h(
+      'button',
+      {
+        class: 'rule-toggle',
+        type: 'button',
+        disabled: readOnly,
+        'aria-pressed': 'true',
+        title: `${label}을 지키며 옮기기`,
+        onclick: () => {
+          enforce[key] = !enforce[key];
+          button.setAttribute('aria-pressed', String(enforce[key]));
+          view?.setEnforce(enforce);
+          toast(enforce[key] ? `${label}을 지키도록 켰어요. 이보다 가까이는 움직이지 않아요.` : `${label} 제한을 껐어요. 자유롭게 움직일 수 있어요.`);
+        },
+      },
+      h('span', { class: 'rule-check' }, icon('check')),
+      `${label} ${num(value)}cm`,
+    );
+    return button;
+  };
+  const rulesBar = h('div', { class: 'ed-rules', role: 'group', 'aria-label': '옮길 때 지킬 규칙' }, ruleToggle('gap', '간격', rules.gap), ruleToggle('margin', '앞 여유 공간', rules.margin));
   // 앱 안에서는 항상 손가락으로 쓰므로 터치용 안내를 보여 준다.
   const touch = !!nativeApp || matchMedia('(pointer: coarse)').matches;
   const hint = h(
@@ -714,6 +739,7 @@ async function openEditor(layout) {
         'div',
         { class: 'ed-main' },
         stage,
+        rulesBar,
         banner,
         hint,
         h(
@@ -756,7 +782,6 @@ async function openEditor(layout) {
   };
   /** 작업본이 바뀐 뒤 화면을 맞춘다. 저장은 하지 않고 저장하기 버튼만 켠다. */
   const refresh = () => {
-    subtitle.textContent = `${dimsText(room)} · 간격 ${num(rules.gap)} · 앞 여유 ${num(rules.margin)}`;
     view?.setItems(items);
     renderInventory();
     undoBtn.disabled = history.length === 0;
@@ -911,6 +936,7 @@ async function openEditor(layout) {
       if (cancelled) return void view.externalCancel();
       const res = view.externalEnd(e.clientX, e.clientY);
       if (!res) return;
+      if (res.blocked) return void toast('간격이나 앞 여유 공간 때문에 여기에는 놓을 수 없어요. 다른 자리에 놓거나, 위의 버튼으로 제한을 꺼 주세요.', 4500);
       snapshot();
       Object.assign(it, { placed: true, x: res.x, z: res.z, rot: res.rot });
       stash(res.displaced);
@@ -1188,7 +1214,7 @@ function renderSettings(page) {
       'section',
       { class: 'panel' },
       h('h2', null, '가구 사이 간격'),
-      h('p', null, '자동 배치할 때 가구와 가구 사이를 이만큼 띄워요. 배치도에서 가구를 끌어다 놓을 때도 이 간격에 맞춰 달라붙어요.'),
+      h('p', null, '자동 배치할 때 가구와 가구 사이를 이만큼 띄워요. 배치도에서 가구를 직접 끌 때도 이보다 가까이는 붙지 않아요.'),
       cmStepper('gap', 1, '가구 사이 간격'),
     ),
     h(
@@ -1197,7 +1223,7 @@ function renderSettings(page) {
       h('h2', null, '가구 앞 여유 공간'),
       h('p', null, '가구를 쓰려면 앞에 서거나 앉을 자리가 필요해요. 자동 배치할 때 가구 앞(벽 반대쪽)으로 이만큼은 다른 가구가 들어오지 않게 비워 둬요. 0으로 두면 여유 없이 배치해요.'),
       cmStepper('margin', 5, '가구 앞 여유 공간'),
-      h('p', { class: 'hint' }, '배치도에서 가구를 누르면 이 공간이 바닥에 옅게 표시돼요. 직접 끌어서 놓을 때는 막지 않으니 표시를 보고 조절하세요.'),
+      h('p', { class: 'hint' }, '배치도에서 가구를 누르면 이 공간이 바닥에 옅게 표시돼요. 가구를 직접 끌 때도 간격과 이 공간을 침범하는 자리로는 움직이지 않고, 편집 화면 위쪽의 버튼으로 각각 끌 수 있어요.'),
       h('p', { class: 'hint' }, '간격과 여유 공간은 배치도를 만들 때의 값이 그 배치도에 함께 저장돼요. 그래서 설정을 바꾸거나 다른 기기에서 열어도 이미 만든 배치도는 그대로예요. 다만 간격이나 앞 여유 공간이 지금 설정과 다른 배치도는 읽기 전용으로 열려서 볼 수만 있어요. 고치려면 설정을 맞추거나 배치도를 새로 만들어 주세요.'),
     ),
     h('section', { class: 'panel' }, h('h2', null, '화면 모드'), h('div', { class: 'seg', role: 'group', 'aria-label': '화면 모드' }, themeButtons)),
