@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "방 크기를 입력하면 가구를 두 벽면에 자동 배치해 주는 웹앱",
+  "description": "방 크기를 입력하면 가구를 벽면에 자동 배치해 주는 웹앱",
   "scripts": {
     "start": "npx --yes serve -l 5173 .",
     "test": "node --test tests/"

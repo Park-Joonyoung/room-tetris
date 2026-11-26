@@ -226,3 +226,21 @@ test('가구 높이 0(방 높이에 맞춤)은 그대로 옮겨지고, 배치도
   d.layouts[0].items[0].h = 0;
   assert.throws(() => parseImport(d), TransferError);
 });
+
+test('네 벽 방향(rot 0~3)과 가구별 앞 여유 공간 여부(clear)가 그대로 옮겨진다', async () => {
+  const db = sampleDb();
+  db.furniture.push({ ...furniture('bed', '침대2', 9), clear: false });
+  db.layouts[0].items.push({ ...placed('i8', '문'), rot: 3, x: 300, z: 40, clear: false }, { ...placed('i9', '책장'), rot: 2, x: 50, z: 250 });
+  const back = await decodePayload(await encodePayload(buildExport(db)));
+  assert.deepEqual(back.furniture, db.furniture);
+  assert.deepEqual(back.layouts, db.layouts);
+  // clear 는 false 일 때만 남긴다(true, 1, 'no' 같은 값은 "필요함"으로 본다).
+  const d = structuredClone(buildExport(db));
+  d.furniture[0].clear = true;
+  d.furniture[1].clear = 'no';
+  d.layouts[0].items[0].rot = 2;
+  const out = parseImport(d);
+  assert.equal('clear' in out.furniture[0], false);
+  assert.equal('clear' in out.furniture[1], false);
+  assert.equal(out.layouts[0].items[0].rot, 2);
+});

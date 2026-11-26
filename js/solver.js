@@ -1,29 +1,33 @@
 // 자동 배치 알고리즘.
 //
-// 방 바닥은 x ∈ [0, room.w], z ∈ [0, room.d]. 가구는 인접한 두 벽에만 붙인다.
-//   벽 A: z = 0 인 벽 (x축을 따라 가구를 한 줄로 세움)
-//   벽 B: x = 0 인 벽 (z축을 따라 가구를 한 줄로 세움)
-// 두 벽이 만나는 모서리는 원점(0, 0).
+// 방 바닥은 x ∈ [0, room.w], z ∈ [0, room.d]. 가구는 네 벽 중 하나에 등을 붙이고 선다.
+//   벽 A (0): z = 0      앞은 +z 쪽      벽 C (2): z = room.d   앞은 -z 쪽
+//   벽 B (1): x = 0      앞은 +x 쪽      벽 D (3): x = room.w   앞은 -x 쪽
+// 벽 A·C 에서는 x 축을, 벽 B·D 에서는 z 축을 따라 가구가 늘어선다.
 //
-// 가구는 돌리지 않는다. 가로(w)는 항상 벽을 따라 놓이고, 세로(d)는 벽에서 방 안쪽으로 뻗는다.
-// 가구끼리는 x축 또는 z축 방향으로 gap 이상 떨어져야 한다.
-// 또 가구 앞(벽 반대쪽)으로 margin 만큼은 사람이 서거나 앉을 자리라서, 다른 가구의 몸체가 들어올 수 없다.
-// 이 여유 공간은 방 안에 있어야 하고, 서로 다른 가구의 여유 공간끼리는 겹쳐도 된다(빈 바닥을 같이 쓴다).
+// 규칙
+//   - 가구는 돌리지 않는다. 가로(w)는 항상 벽을 따라 놓이고, 세로(d)는 벽에서 방 안쪽으로 뻗는다.
+//   - 가구끼리는 x 축 또는 z 축 방향으로 gap 이상 떨어져야 한다.
+//   - 가구 앞(벽 반대쪽)으로 margin 만큼은 사람이 서거나 앉을 자리라서 다른 가구의 몸체가 들어올 수 없다.
+//     이 공간은 방 안에 있어야 하고, 서로 다른 가구의 앞 공간끼리는 겹쳐도 된다(빈 바닥을 같이 쓴다).
+//     가구마다 이 공간이 필요 없다고 표시할 수 있다(item.clear === false: 침대, 문 등).
 //
-// 탐색: 가구를 하나씩 골라 벽 A 또는 B의 줄 끝에 "모서리 쪽으로 최대한 붙여" 추가하는
-// 깊이 우선 탐색. 모든 삽입 순서를 따지므로 모서리 근처에서 두 줄이 맞물리는 경우도 찾는다.
-// 앞 여유 공간이 간격보다 크면, 두 벽의 가구가 서로 앞을 막지 않도록 모서리를 비우고 비켜서는
-// 배치가 필요할 수 있어서, 아직 안 놓은 가구의 깊이만큼 미리 띄운 위치도 후보로 시도한다.
-// 전부 놓을 수 없으면 (놓은 개수, 놓은 부피) 가 가장 큰 배치를 돌려준다.
+// 탐색
+//   가구를 하나씩 골라 (벽, 그 벽의 어느 쪽 끝에서부터) 를 정하고, 그 끝에서부터 "들어갈 수 있는
+//   가장 가까운 자리"에 놓는 깊이 우선 탐색이다. 모든 순서를 따지므로 모서리에서 두 벽의 가구가
+//   맞물리는 경우도 찾는다. 앞 공간이 간격보다 크면 두 벽의 가구가 모서리를 비우고 서로 비켜서야
+//   할 때가 있어서, 아직 안 놓은 가구의 깊이만큼 미리 띄운 자리도 후보로 시도한다.
+//   전부 놓을 수 없으면 (놓은 개수, 놓은 부피) 가 가장 큰 배치를 돌려준다.
 
 const EPS = 1e-6;
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+const WALL_NAMES = ['A', 'B', 'C', 'D'];
 
 export const DEFAULT_TIME_LIMIT_MS = 30000;
 
 /**
  * @param {{w:number,d:number,h:number}} room
- * @param {{id:string,w:number,d:number,h:number}[]} items
+ * @param {{id:string,w:number,d:number,h:number,clear?:boolean}[]} items clear === false 면 앞 여유 공간이 필요 없는 가구
  * @param {number} gap 가구 사이 간격(cm)
  * @param {{
  *   margin?: number,                 // 가구 앞 여유 공간(cm)
@@ -31,8 +35,8 @@ export const DEFAULT_TIME_LIMIT_MS = 30000;
  *   random?: () => number,           // 주면 매번 다른 배치를 시도
  *   onProgress?: (result: object) => void, // 더 좋은 배치를 찾을 때마다(자주는 아님) 호출
  * }} [opts]
- * @returns {{placements:{id:string,x:number,z:number,rot:0|1,wall:'A'|'B'}[], unplaced:string[], complete:boolean, timedOut:boolean}}
- *   rot 은 가구가 어느 벽을 따라 놓였는지를 뜻한다(0 = 벽 A, 1 = 벽 B). 가로는 항상 벽을 따른다.
+ * @returns {{placements:{id:string,x:number,z:number,rot:0|1|2|3,wall:'A'|'B'|'C'|'D'}[], unplaced:string[], complete:boolean, timedOut:boolean}}
+ *   rot 은 가구가 등을 붙인 벽의 번호(0 = A, 1 = B, 2 = C, 3 = D)다.
  */
 export function solve(room, items, gap = 0, opts = {}) {
   const { timeLimitMs = DEFAULT_TIME_LIMIT_MS, random = null, onProgress = null } = opts;
@@ -70,8 +74,7 @@ function toResult(items, best, timedOut) {
   items.forEach((it, i) => {
     const p = best.place && best.place[i];
     if (!p) unplaced.push(it.id);
-    else if (p.wall === 0) placements.push({ id: it.id, x: round(p.pos), z: 0, rot: 0, wall: 'A' });
-    else placements.push({ id: it.id, x: 0, z: round(p.pos), rot: 1, wall: 'B' });
+    else placements.push({ id: it.id, x: round(p.x), z: round(p.z), rot: p.wall, wall: WALL_NAMES[p.wall] });
   });
   return { placements, unplaced, complete: unplaced.length === 0, timedOut };
 }
@@ -82,20 +85,25 @@ function round(v) {
 
 function runSearch(room, items, gap, { margin, order, random, deadline, best, report }) {
   const n = items.length;
-  const limit = [room.w, room.d]; // 벽 A는 방의 가로 길이, 벽 B는 세로 길이만큼 쓸 수 있다
-  const depthLimit = [room.d, room.w];
+  const W = room.w;
+  const D = room.d;
+  const wallLen = [W, D, W, D]; // 벽을 따라 쓸 수 있는 길이
+  const wallDepth = [D, W, D, W]; // 벽에서 맞은편 벽까지의 거리
 
-  // 가구별로 놓을 수 있는 벽. 벽을 따라 w, 방 안쪽으로 d(+ 앞 여유 공간) 를 차지한다.
-  const walls = items.map((it) => {
+  // 가구마다 필요한 앞 공간(필요 없는 가구는 0)
+  const front = items.map((it) => (it.clear === false ? 0 : margin));
+  // 가구별로 놓을 수 있는 벽. 벽을 따라 w, 방 안쪽으로 d(+ 앞 공간) 를 차지한다.
+  const walls = items.map((it, i) => {
     if (!(it.w > 0 && it.d > 0 && it.h > 0) || it.h > room.h + EPS) return [];
-    return [0, 1].filter((wall) => it.w <= limit[wall] + EPS && it.d + margin <= depthLimit[wall] + EPS);
+    return [0, 1, 2, 3].filter((wall) => it.w <= wallLen[wall] + EPS && it.d + front[i] <= wallDepth[wall] + EPS);
   });
   const clear = Math.max(gap, margin); // 다른 벽 가구의 "앞"을 완전히 벗어나는 데 필요한 거리
-  const lookahead = clear > gap + EPS; // 미리 띄운 위치도 시도해야 하는가
+  const lookahead = clear > gap + EPS; // 미리 띄운 자리도 시도해야 하는가
   const offsets = [...new Set([0, gap, clear])];
+
   const placeable = walls.filter((w) => w.length > 0).length;
   const vol = items.map((it) => it.w * it.d * it.h);
-  const sig = items.map((it) => `${it.w}|${it.d}|${it.h}`);
+  const sig = items.map((it) => `${it.w}|${it.d}|${it.h}|${it.clear === false ? 0 : 1}`);
 
   const idx = items.map((_, i) => i).filter((i) => walls[i].length > 0);
   const byLen = [...idx].sort((a, b) => items[a].w - items[b].w);
@@ -105,8 +113,9 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
   else if (random) itemOrder = shuffle([...idx], random);
   else itemOrder = [...idx].sort((a, b) => items[b].w - items[a].w || vol[b] - vol[a]);
 
-  const rows = [[], []]; // rows[wall] = [{start, dep}]
-  const cursor = [0, 0]; // 다음 가구가 시작할 수 있는 최소 위치(이전 가구 끝 + gap)
+  // 놓인 가구들: 몸체 b 와 앞 공간 zone 을 [x0, x1, z0, z1] 로 적어 둔다(앞 공간이 없으면 zone 은 null).
+  const placed = [];
+  const used = [0, 0, 0, 0]; // 벽마다 쓴 길이(가구 길이 + 간격의 합)
   const place = new Array(n).fill(null);
   let count = 0;
   let volume = 0;
@@ -116,30 +125,120 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
   const seen = new Set();
   const SEEN_MAX = 150000; // 메모리 사용량 제한
 
-  // 줄 끝에 추가할 때 모서리 쪽으로 가장 붙일 수 있는 위치.
-  // 반대편 벽의 가구 o 와의 관계는 o 가 어디서 시작하느냐에 따라 달라진다(새 가구의 깊이 = dep).
-  //   o 가 새 가구의 앞 여유 공간보다도 멀리서 시작      → 서로 무관
-  //   o 가 새 가구 깊이 + 간격 뒤에서 시작(여유 공간 안)  → 새 가구가 o 의 깊이만 벗어나면 됨(대각선 배치)
-  //   o 가 새 가구 깊이 바로 뒤에서 시작                  → o 의 깊이 + 간격을 벗어나야 함
-  //   o 가 새 가구 깊이 안쪽에서 시작(o 의 앞을 가로막음)  → o 의 깊이 + 앞 여유 공간까지 벗어나야 함
-  function minPos(wall, dep) {
-    let p = cursor[wall];
-    const other = rows[1 - wall];
-    for (let k = 0; k < other.length; k++) {
-      const o = other[k];
-      let need;
-      if (o.start >= dep + clear - EPS) continue;
-      else if (o.start >= dep + gap - EPS) need = o.dep;
-      else if (o.start >= dep - EPS) need = o.dep + gap;
-      else need = o.dep + clear;
-      if (p < need - EPS) p = need;
+  /** 벽 wall 에서 벽을 따라 t 위치에 놓인 가구의 몸체와 앞 공간 */
+  function shape(wall, t, len, dep, m) {
+    switch (wall) {
+      case 0:
+        return { b: [t, t + len, 0, dep], zone: m > 0 ? [t, t + len, dep, dep + m] : null };
+      case 1:
+        return { b: [0, dep, t, t + len], zone: m > 0 ? [dep, dep + m, t, t + len] : null };
+      case 2:
+        return { b: [t, t + len, D - dep, D], zone: m > 0 ? [t, t + len, D - dep - m, D - dep] : null };
+      default:
+        return { b: [W - dep, W, t, t + len], zone: m > 0 ? [W - dep - m, W - dep, t, t + len] : null };
     }
-    return p;
+  }
+
+  /**
+   * 벽 wall 의 fromEnd 쪽 끝(0 = 좌표가 작은 쪽, 1 = 큰 쪽)에서 offset 만큼 떨어진 곳부터 찾아,
+   * 길이 len·깊이 dep·앞 공간 m 인 가구가 들어갈 수 있는 가장 가까운 자리를 구한다. 없으면 null.
+   *
+   * 벽을 따라 미끄러뜨릴 때 놓인 가구 하나가 막는 범위는 t 에 대한 구간으로 나온다:
+   *   간격       — 벽에 수직인 방향으로 간격보다 가까운 가구와는, 벽 방향으로 간격만큼 떨어져야 한다.
+   *   내 앞 공간 — 내 앞 공간 깊이에 걸친 가구와는, 벽 방향으로 겹치면 안 된다.
+   *   남의 앞 공간 — 내 몸체 깊이에 걸친 남의 앞 공간과는, 벽 방향으로 겹치면 안 된다.
+   * 막힌 구간 안에 있으면 그 구간 끝으로 옮기기를, 더 옮길 필요가 없을 때까지 되풀이한다.
+   */
+  function findSpot(wall, fromEnd, len, dep, m, offset) {
+    const L = wallLen[wall];
+    const si = (wall & 1) * 2; // 벽을 따르는 축의 범위가 들어 있는 자리(x 면 0, z 면 2)
+    const pi = 2 - si; // 벽에 수직인 축
+    let bp0; // 내 몸체가 수직 방향으로 차지하는 범위
+    let bp1;
+    let zp0; // 내 앞 공간이 수직 방향으로 차지하는 범위
+    let zp1;
+    if (wall < 2) {
+      bp0 = 0;
+      bp1 = dep;
+      zp0 = dep;
+      zp1 = dep + m;
+    } else {
+      const far = wallDepth[wall];
+      bp0 = far - dep;
+      bp1 = far;
+      zp0 = far - dep - m;
+      zp1 = far - dep;
+    }
+
+    let t = fromEnd === 0 ? offset : L - len - offset;
+    for (let guard = placed.length * 3 + 2; guard > 0; guard--) {
+      let moved = false;
+      for (let k = 0; k < placed.length; k++) {
+        const o = placed[k];
+        const os0 = o.b[si];
+        const os1 = o.b[si + 1];
+        const op0 = o.b[pi];
+        const op1 = o.b[pi + 1];
+        let lo = Infinity;
+        let hi = -Infinity;
+        // 간격
+        if (Math.max(op0 - bp1, bp0 - op1) < gap - EPS) {
+          lo = os0 - gap - len;
+          hi = os1 + gap;
+        }
+        // 내 앞 공간을 o 의 몸체가 막는 경우
+        if (m > 0 && zp0 < op1 - EPS && op0 < zp1 - EPS) {
+          lo = Math.min(lo, os0 - len);
+          hi = Math.max(hi, os1);
+        }
+        if (t > lo + EPS && t < hi - EPS) {
+          t = fromEnd === 0 ? hi : lo;
+          moved = true;
+        }
+        // o 의 앞 공간을 내 몸체가 막는 경우(위의 구간과 떨어져 있을 수 있어 따로 본다)
+        const oz = o.zone;
+        if (oz && bp0 < oz[pi + 1] - EPS && oz[pi] < bp1 - EPS) {
+          const zlo = oz[si] - len;
+          const zhi = oz[si + 1];
+          if (t > zlo + EPS && t < zhi - EPS) {
+            t = fromEnd === 0 ? zhi : zlo;
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+    if (t < -EPS || t + len > L + EPS) return null;
+    return t < 0 ? 0 : t;
+  }
+
+  /**
+   * 벽 wall 의 fromEnd 쪽 모서리에서 재어, 그 벽에 앞으로 놓일 가구가 시작할 수 있는 가장 가까운 거리.
+   * 모서리부터 이미 가구가 빈틈없이(가장 짧은 남은 가구도 못 들어가게) 차 있으면 그만큼 멀어진다.
+   */
+  function openFrom(wall, fromEnd, minLen) {
+    const L = wallLen[wall];
+    const si = (wall & 1) * 2;
+    const spans = [];
+    for (let i = 0; i < n; i++) {
+      const p = place[i];
+      if (!p || p.wall !== wall) continue;
+      const s0 = p.t;
+      const s1 = p.t + items[i].w;
+      spans.push(fromEnd === 0 ? [s0, s1] : [L - s1, L - s0]);
+    }
+    spans.sort((a, b) => a[0] - b[0]);
+    let cover = 0;
+    for (const [s0, s1] of spans) {
+      if (s0 - cover >= minLen - EPS) break; // 여기 빈틈에 가구가 들어갈 수 있다
+      cover = Math.max(cover, s1 + gap);
+    }
+    return cover;
   }
 
   function dfs() {
     nodes++;
-    if ((nodes & 127) === 0) {
+    if ((nodes & 7) === 0) {
       const t = now();
       if (t > deadline) timedOut = true;
       else if (report && best.dirty && t - best.reportedAt > 150) {
@@ -162,7 +261,8 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
     }
 
     // 가지치기: 남은 벽 길이로 최대 몇 개를 더 놓을 수 있는지 상한을 구한다.
-    const free = limit[0] - cursor[0] + gap + (limit[1] - cursor[1] + gap);
+    let free = 0;
+    for (let w = 0; w < 4; w++) free += wallLen[w] + gap - used[w];
     let extra = 0;
     let need = 0;
     for (let k = 0; k < byLen.length; k++) {
@@ -190,15 +290,24 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
       let key = '';
       for (let i = 0; i < n; i++) {
         const p = place[i];
-        key += p ? `${p.wall}@${p.pos.toFixed(2)};` : '-;';
+        key += p ? `${p.wall}@${p.t.toFixed(2)};` : '-;';
       }
       if (seen.has(key)) return;
       seen.add(key);
     }
 
-    // 벽은 남은 길이가 긴 쪽부터 채워서 두 벽에 고르게 나뉘도록 한다.
-    let firstWall = limit[0] - cursor[0] >= limit[1] - cursor[1] ? 0 : 1;
-    if (random && random() < 0.35) firstWall = 1 - firstWall;
+    // 벽을 고르는 순서. 기본 시점에서 잘 보이는 안쪽 두 벽(A, B)을 먼저 채우고, 모자라면 나머지(C, D)를 쓴다.
+    // 같은 묶음 안에서는 남은 길이가 긴 벽부터.
+    let wallOrder = [0, 1, 2, 3];
+    const first = count === 0;
+    if (first) {
+      // 방은 좌우·앞뒤로 뒤집어도 같은 문제이므로, 맨 처음 가구는 벽 A·B 의 작은 좌표 쪽 끝에만 놓아 본다.
+      wallOrder = [0, 1];
+    } else if (random) {
+      shuffle(wallOrder, random);
+    } else {
+      wallOrder.sort((a, b) => (a >> 1) - (b >> 1) || wallLen[b] - used[b] - (wallLen[a] - used[a]));
+    }
 
     const triedSig = new Set();
     for (let k = 0; k < itemOrder.length; k++) {
@@ -209,44 +318,71 @@ function runSearch(room, items, gap, { margin, order, random, deadline, best, re
 
       const len = items[i].w;
       const dep = items[i].d;
-      for (let s = 0; s < 2; s++) {
-        const wall = s === 0 ? firstWall : 1 - firstWall;
+      const m = front[i];
+      const triedSpot = new Set();
+      let minOtherLen = Infinity; // 이 가구를 뺀 남은 가구 중 가장 짧은 것
+      if (lookahead) {
+        for (let q = 0; q < byLen.length; q++) {
+          const j = byLen[q];
+          if (j !== i && !place[j]) {
+            minOtherLen = items[j].w;
+            break;
+          }
+        }
+      }
+      for (let s = 0; s < wallOrder.length; s++) {
+        const wall = wallOrder[s];
         if (!walls[i].includes(wall)) continue;
-        const base = minPos(wall, dep);
-        if (base + len > limit[wall] + EPS) continue;
-        // 기본은 가장 붙인 위치. 반대편 줄이 아직 이 가구의 앞 구역까지 자라지 않았다면,
-        // 나중에 그 줄에 올 가구(깊이 D)를 위해 D, D + 간격, D + 여유만큼 띄운 위치도 시도한다.
-        let positions = [base];
-        if (lookahead && cursor[1 - wall] < dep + clear - EPS) {
-          const extra = new Set();
-          for (let m = 0; m < itemOrder.length; m++) {
-            const j = itemOrder[m];
-            if (j === i || place[j] || !walls[j].includes(1 - wall)) continue;
-            for (const off of offsets) {
-              const v = items[j].d + off;
-              if (v > base + EPS && v + len <= limit[wall] + EPS) extra.add(round(v));
+        for (let fromEnd = 0; fromEnd < (first ? 1 : 2); fromEnd++) {
+          // 끝에서 바로 찾는 자리가 기본. 여기에 더해, 이 모서리에서 만나는 옆 벽에 나중에 올 가구(깊이 d)를
+          // 위해 d, d + 간격, d + 앞 공간만큼 띄운 자리도 시도한다.
+          const base = findSpot(wall, fromEnd, len, dep, m, 0);
+          if (base === null) continue; // 끝에서부터 찾아도 자리가 없으면 더 띄워도 없다
+          const baseDist = fromEnd === 0 ? base : wallLen[wall] - len - base; // 모서리에서 떨어진 거리
+          let starts = [0];
+          if (lookahead && minOtherLen < Infinity) {
+            const neighbor = wall & 1 ? (fromEnd === 0 ? 0 : 2) : fromEnd === 0 ? 1 : 3;
+            // 옆 벽의 이 모서리 쪽 끝. (벽 A·C 의 작은 좌표 끝은 벽 B, 큰 좌표 끝은 벽 D 와 만나고,
+            //  그 벽들에서 보면 벽 A 쪽이 작은 좌표 끝, 벽 C 쪽이 큰 좌표 끝이다. 벽 B·D 도 마찬가지.)
+            const neighborEnd = wall < 2 ? 0 : 1;
+            // 옆 벽에 앞으로 올 가구가 이 가구의 깊이 + 앞 공간 안쪽에서 시작할 수 없다면 미리 띄울 이유가 없다.
+            if (openFrom(neighbor, neighborEnd, minOtherLen) < dep + clear - EPS) {
+              const extraStarts = new Set();
+              for (let q = 0; q < itemOrder.length; q++) {
+                const j = itemOrder[q];
+                if (j === i || place[j] || !walls[j].includes(neighbor)) continue;
+                for (const off of offsets) {
+                  const v = round(items[j].d + off);
+                  if (v > baseDist + EPS) extraStarts.add(v); // 기본 자리보다 가까운 값은 같은 자리가 된다
+                }
+              }
+              if (extraStarts.size) starts = [0, ...[...extraStarts].sort((a, b) => a - b)];
             }
           }
-          if (extra.size) positions = [base, ...[...extra].sort((a, b) => a - b)];
-        }
-        for (const pos of positions) {
+          for (const start of starts) {
+            const t = start === 0 ? base : findSpot(wall, fromEnd, len, dep, m, start);
+            if (t === null) continue;
+            const spot = `${wall}@${t.toFixed(2)}`;
+            if (triedSpot.has(spot)) continue;
+            triedSpot.add(spot);
 
-        const prevCursor = cursor[wall];
-        rows[wall].push({ start: pos, dep });
-        cursor[wall] = pos + len + gap;
-        place[i] = { wall, pos };
-        count++;
-        volume += vol[i];
+            const sh = shape(wall, t, len, dep, m);
+            placed.push(sh);
+            used[wall] += len + gap;
+            place[i] = { wall, t, x: sh.b[0], z: sh.b[2] };
+            count++;
+            volume += vol[i];
 
-        dfs();
+            dfs();
 
-        volume -= vol[i];
-        count--;
-        place[i] = null;
-        cursor[wall] = prevCursor;
-        rows[wall].pop();
+            volume -= vol[i];
+            count--;
+            place[i] = null;
+            used[wall] -= len + gap;
+            placed.pop();
 
-        if (done || timedOut) return;
+            if (done || timedOut) return;
+          }
         }
       }
     }

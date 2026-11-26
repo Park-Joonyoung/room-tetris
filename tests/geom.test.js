@@ -116,3 +116,60 @@ test('slideToward: 가구를 뚫고 건너편으로 넘어가지 않는다(목�
   const out = slideToward({ x: 300, z: 0 }, { x: 60, z: 0 }, allowed);
   assert.equal(out.x, 205);
 });
+
+// ───────────── 네 벽, 가구별 앞 여유 공간 ─────────────
+
+test('frontZone: 벽 C 는 -z, 벽 D 는 -x 가 앞', () => {
+  assert.deepEqual(frontZone(rect(10, 250, 100, 50), 2, 60), rect(10, 190, 100, 60));
+  assert.deepEqual(frontZone(rect(350, 10, 50, 100), 3, 60), rect(290, 10, 60, 100));
+});
+
+test('footprint / wallOf: 벽 B·D 에서는 가로가 z 축을 따른다', async () => {
+  const { footprint: fp, wallOf } = await import('../js/geom.js');
+  const item = { w: 120, d: 60 };
+  assert.deepEqual(fp({ ...item, rot: 0 }), { sx: 120, sz: 60 });
+  assert.deepEqual(fp({ ...item, rot: 1 }), { sx: 60, sz: 120 });
+  assert.deepEqual(fp({ ...item, rot: 2 }), { sx: 120, sz: 60 });
+  assert.deepEqual(fp({ ...item, rot: 3 }), { sx: 60, sz: 120 });
+  assert.deepEqual([wallOf({}), wallOf({ rot: 3 }), wallOf({ rot: 9 }), wallOf({ rot: true })], [0, 3, 0, 1]);
+});
+
+test('wallFor: 가장 가까운 벽을 고르고, 중간쯤에서는 지금 방향을 유지한다', async () => {
+  const { wallFor } = await import('../js/geom.js');
+  const r = { w: 400, d: 300, h: 240 };
+  const chair = { w: 50, d: 50, h: 80 };
+  assert.equal(wallFor(chair, r, 200, 20), 0); // 벽 A
+  assert.equal(wallFor(chair, r, 20, 150), 1); // 벽 B
+  assert.equal(wallFor(chair, r, 200, 280), 2); // 벽 C
+  assert.equal(wallFor(chair, r, 380, 150), 3); // 벽 D
+  // 벽 A 까지 100, 벽 B 까지 95: 조금 더 가깝지만 지금 방향(A)을 유지한다.
+  assert.equal(wallFor(chair, r, 95, 100, 0), 0);
+  assert.equal(wallFor(chair, r, 60, 100, 0), 1); // 확실히 더 가까우면 바꾼다
+  // 가로가 긴 가구는 짧은 벽(B, D) 방향으로는 들어가지 않으므로 긴 벽 방향을 쓴다.
+  assert.equal(wallFor({ w: 350, d: 50, h: 80 }, r, 20, 150), 0);
+  assert.equal(wallFor({ w: 500, d: 50, h: 80 }, r, 20, 150), null);
+});
+
+test('마주 보는 벽: 서로의 앞 공간을 막으면 안 된다', () => {
+  // 벽 A 의 침대(깊이 100, 앞 공간 z 100~160). 맞은편 벽 C 에 깊이 60 짜리 책상을 둔다.
+  const deskOnC = (roomDepth) => rect(0, roomDepth - 60, 120, 60);
+  // 방 세로 300: 침대 앞 끝 160 < 책상 시작 240 이고, 책상 앞 공간(180~240)도 침대(~100)에 닿지 않는다.
+  assert.equal(placementAllowed(deskOnC(300), 2, [bed], { w: 400, d: 300 }, ON), true);
+  // 방 세로 210: 책상이 z 150~210 에 놓여 침대 앞 공간(100~160)을 막는다.
+  assert.equal(placementAllowed(deskOnC(210), 2, [bed], { w: 400, d: 210 }, ON), false);
+  // 옆으로 비켜서면(x 가 겹치지 않으면) 괜찮다.
+  assert.equal(placementAllowed(rect(205, 150, 120, 60), 2, [bed], { w: 400, d: 210 }, ON), true);
+});
+
+test('앞 여유 공간이 필요 없는 가구: 앞이 막혀도 되지만 남의 앞은 막지 못한다', () => {
+  const bedNoClear = { ...bed, clear: false };
+  const drawer = (z) => rect(0, z, 45, 80); // 벽 B 방향 서랍장
+  // 침대에 앞 공간이 필요 없으면 서랍장이 침대 바로 앞(간격만 띄우고)까지 올 수 있다.
+  assert.equal(placementAllowed(drawer(105), 1, [bedNoClear], room, ON), true);
+  assert.equal(placementAllowed(drawer(105), 1, [bed], room, ON), false);
+  // 반대로, 앞 공간이 필요 없는 가구(문 등)를 옮길 때도 남의 앞 공간에는 들어가지 못한다.
+  assert.equal(placementAllowed(drawer(105), 1, [bed], room, ON, false), false);
+  // 앞 공간이 필요 없는 가구는 맞은편 벽에 바짝 붙어 있어도 된다(자기 앞 공간이 방 안에 있을 필요가 없다).
+  assert.equal(placementAllowed(rect(300, 250, 50, 50), 0, [], room, ON, false), true);
+  assert.equal(placementAllowed(rect(300, 250, 50, 50), 0, [], room, ON, true), false);
+});

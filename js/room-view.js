@@ -1,9 +1,9 @@
-// 배치도 3D 화면. Three.js 로 방(바닥 + 인접한 두 벽)과 가구(직육면체)를 그리고,
+// 배치도 3D 화면. Three.js 로 방(바닥 + 네 벽)과 가구(직육면체)를 그리고,
 // 시점 회전 / 확대·축소 / 가구 드래그 / 탭해서 이름 보기를 처리한다.
 // 데이터는 직접 바꾸지 않고 콜백(onMove, onStash)으로 알려 준다.
 
 import * as THREE from 'three';
-import { footprint, rectOf, rectsOverlap, wallFor, clamp, placementAllowed, slideToward } from './geom.js';
+import { footprint, rectOf, rectsOverlap, wallFor, wallOf, clamp, placementAllowed, slideToward } from './geom.js';
 
 const DEG = Math.PI / 180;
 const DEFAULT_ELEVATION = 30 * DEG; // 맞은편 모서리의 살짝 위에서 내려다보는 각도
@@ -145,7 +145,8 @@ export class RoomView {
     disposeChildren(this.roomGroup);
     const { w, d, h } = this.room;
     const c = this.colors;
-    // 방 면은 뒤에서 보면 투명(단면)이라, 시점을 돌려도 가구를 가리지 않는다.
+    // 벽은 방 안쪽에서만 보이는 단면이다. 그래서 어느 쪽에서 보든 카메라와 방 사이에 있는 벽은
+    // 그려지지 않고 맞은편 벽만 보여서, 시점을 돌려도 벽이 가구를 가리지 않는다.
     const surface = (color) =>
       new THREE.MeshBasicMaterial({ color, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
 
@@ -160,6 +161,14 @@ export class RoomView {
     wallB.rotation.y = Math.PI / 2;
     wallB.position.set(0, h / 2, d / 2);
 
+    const wallC = new THREE.Mesh(new THREE.PlaneGeometry(w, h), surface(c.wallA)); // z = d
+    wallC.rotation.y = Math.PI;
+    wallC.position.set(w / 2, h / 2, d);
+
+    const wallD = new THREE.Mesh(new THREE.PlaneGeometry(d, h), surface(c.wallB)); // x = w
+    wallD.rotation.y = -Math.PI / 2;
+    wallD.position.set(w, h / 2, d / 2);
+
     // 바닥 격자: 50cm 간격(큰 방은 100cm)
     const step = Math.max(w, d) > 1200 ? 100 : 50;
     const pts = [];
@@ -171,16 +180,16 @@ export class RoomView {
       [
         // 바닥 테두리
         0, 0, 0, w, 0, 0, w, 0, 0, w, 0, d, w, 0, d, 0, 0, d, 0, 0, d, 0, 0, 0,
-        // 벽 A 테두리
-        0, 0, 0, 0, h, 0, 0, h, 0, w, h, 0, w, h, 0, w, 0, 0,
-        // 벽 B 테두리
-        0, h, 0, 0, h, d, 0, h, d, 0, 0, d,
+        // 네 모서리의 기둥
+        0, 0, 0, 0, h, 0, w, 0, 0, w, h, 0, w, 0, d, w, h, d, 0, 0, d, 0, h, d,
+        // 천장 테두리
+        0, h, 0, w, h, 0, w, h, 0, w, h, d, w, h, d, 0, h, d, 0, h, d, 0, h, 0,
       ],
       c.line,
-      1,
+      0.75,
     );
 
-    this.roomGroup.add(floor, wallA, wallB, grid, outline);
+    this.roomGroup.add(floor, wallA, wallB, wallC, wallD, grid, outline);
     this.invalidate();
   }
 
@@ -198,14 +207,17 @@ export class RoomView {
     edges.position.y = item.h / 2;
     group.add(box, edges);
 
-    // 가구 앞(벽 반대쪽) 여유 공간을 바닥에 옅게 표시한다. 벽 A 방향이면 +z, 벽 B 방향이면 +x 가 앞.
+    // 가구 앞(등을 댄 벽의 반대쪽) 여유 공간을 바닥에 옅게 표시한다. 앞 공간이 필요 없는 가구에는 없다.
     const margin = Math.max(0, this.cb.getMargin?.() ?? 0);
     let zone = null;
-    if (margin > 0) {
+    if (margin > 0 && item.clear !== false) {
+      const rot = wallOf(item);
+      const sideways = rot & 1; // 벽 B·D: 앞이 x 방향
+      const sign = rot < 2 ? 1 : -1; // 벽 A·B 는 좌표가 커지는 쪽이 앞, 벽 C·D 는 작아지는 쪽이 앞
       const zoneMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3, depthWrite: false });
-      zone = new THREE.Mesh(new THREE.PlaneGeometry(item.rot ? margin : sx, item.rot ? sz : margin), zoneMat);
+      zone = new THREE.Mesh(new THREE.PlaneGeometry(sideways ? margin : sx, sideways ? sz : margin), zoneMat);
       zone.rotation.x = -Math.PI / 2;
-      zone.position.set(item.rot ? sx / 2 + margin / 2 : 0, 0.6, item.rot ? 0 : sz / 2 + margin / 2);
+      zone.position.set(sideways ? sign * (sx / 2 + margin / 2) : 0, 0.6, sideways ? 0 : sign * (sz / 2 + margin / 2));
       zone.visible = ghost && this.enforce.margin;
       group.add(zone);
     }
@@ -267,7 +279,7 @@ export class RoomView {
 
   /** 이 가구를 뺀, 방에 놓인 가구들의 자리와 방향. */
   othersOf(selfId) {
-    return this.items.filter((o) => o.placed && o.id !== selfId).map((o) => ({ rect: rectOf(o), rot: o.rot ? 1 : 0 }));
+    return this.items.filter((o) => o.placed && o.id !== selfId).map((o) => ({ rect: rectOf(o), rot: wallOf(o), clear: o.clear !== false }));
   }
 
   markDisplaced(ids) {
@@ -278,7 +290,7 @@ export class RoomView {
 
   // ───────────────────────── 카메라 ─────────────────────────
 
-  /** 기본 시점: 가구를 놓는 두 벽이 만나는 모서리의 맞은편 모서리, 살짝 위. */
+  /** 기본 시점: 벽 A 와 B 가 만나는 모서리의 맞은편 모서리, 살짝 위. */
   resetView() {
     const { w, d } = this.room;
     this.az = Math.atan2(w, d);
@@ -683,7 +695,7 @@ export class RoomView {
     const y = clamp(press.point.y, 0, item.h);
     this.dragPlane.set(UP, -y);
     const p = this.rayToPlane(press.x0, press.y0, this.dragPlane) || press.point;
-    const rot = item.rot ? 1 : 0;
+    const rot = wallOf(item);
     this.gesture = {
       type: 'drag',
       id: item.id,
@@ -699,7 +711,7 @@ export class RoomView {
       displaced: [],
       overInv: false,
       // 처음부터 규칙에 어긋나 있던 가구는 맞는 자리에 닿을 때까지 자유롭게 움직인다(안 그러면 꺼낼 수가 없다).
-      free: !placementAllowed({ x: item.x, z: item.z, sx, sz }, rot, this.othersOf(item.id), this.room, this.activeRules()),
+      free: !placementAllowed({ x: item.x, z: item.z, sx, sz }, rot, this.othersOf(item.id), this.room, this.activeRules(), item.clear !== false),
     };
     this.select(item.id);
     this.styleItems();
@@ -743,7 +755,7 @@ export class RoomView {
   dragTo(g, rot, cx, cz, others, rules) {
     const f = footprint({ w: g.item.w, d: g.item.d, rot });
     const target = this.snapPosition(g.id, cx - f.sx / 2, cz - f.sz / 2, f.sx, f.sz);
-    const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules);
+    const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules, g.item.clear !== false);
     let next;
     if (allowed(target.x, target.z)) {
       next = target;
@@ -827,7 +839,7 @@ export class RoomView {
         const target = this.snapPosition(null, p.x - f.sx / 2, p.z - f.sz / 2, f.sx, f.sz);
         const others = this.othersOf(null);
         const rules = this.activeRules();
-        const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules);
+        const allowed = (x, z) => placementAllowed({ x, z, sx: f.sx, sz: f.sz }, rot, others, this.room, rules, e.item.clear !== false);
         let next = target;
         if (allowed(target.x, target.z)) {
           e.valid = true;
@@ -915,10 +927,12 @@ export class RoomView {
   }
 }
 
-/** 한쪽 벽 방향으로 만든 모형을 다른 벽 방향으로 보이게 하는 회전각(앞쪽이 +z ↔ +x 로 바뀌도록). */
+/**
+ * 한 벽 방향으로 만든 모형을 다른 벽 방향으로 보이게 하는 회전각.
+ * 앞쪽은 벽 A 가 +z, B 가 +x, C 가 -z, D 가 -x 이고, 위에서 볼 때 +z 에서 +x 로 도는 쪽이 양의 각도다.
+ */
 function quarterTurn(builtRot, rot) {
-  if (builtRot === rot) return 0;
-  return builtRot === 0 ? Math.PI / 2 : -Math.PI / 2;
+  return ((rot - builtRot) * Math.PI) / 2;
 }
 
 function num(v) {

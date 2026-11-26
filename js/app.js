@@ -235,6 +235,33 @@ function route() {
 
 // ───────────────────────── 가구 관리 ─────────────────────────
 
+/** 가구(또는 배치도 안의 가구)에 앞 여유 공간이 필요한지 적는다. 필요하면 표시를 지우고, 필요 없으면 clear: false. */
+function setClear(target, needed) {
+  if (needed) delete target.clear;
+  else target.clear = false;
+}
+
+/**
+ * 가구 관리에서 "앞 여유 공간 적용"을 바꾸면, 그 가구가 들어 있는 기존 배치도에도 똑같이 반영한다.
+ * @returns {number} 바뀐 배치도 수
+ */
+function applyClearToLayouts(furnitureId, needed, at) {
+  let changed = 0;
+  for (const layout of db.layouts) {
+    let touched = false;
+    for (const it of layout.items) {
+      if (it.fid !== furnitureId || (it.clear !== false) === needed) continue;
+      setClear(it, needed);
+      touched = true;
+    }
+    if (touched) {
+      layout.updatedAt = at; // 다른 기기로 옮길 때 이 변경이 최신으로 넘어가도록
+      changed++;
+    }
+  }
+  return changed;
+}
+
 function renderFurniture(page) {
   const list = db.furniture;
   page.replaceChildren(
@@ -252,7 +279,7 @@ function renderFurniture(page) {
                 'button',
                 { class: 'card-main', type: 'button', onclick: () => openFurnitureForm(f, () => renderFurniture(page)) },
                 h('span', { class: 'swatch', style: { background: safeColor(f.color) } }),
-                h('span', { class: 'card-text' }, h('b', null, f.name), h('small', null, f.h === 0 ? `가로 ${num(f.w)} · 세로 ${num(f.d)} cm · 높이 최대(방 높이)` : `가로 ${num(f.w)} · 세로 ${num(f.d)} · 높이 ${num(f.h)} cm`)),
+                h('span', { class: 'card-text' }, h('b', null, f.name), h('small', null, f.h === 0 ? `가로 ${num(f.w)} · 세로 ${num(f.d)} cm · 높이 최대(방 높이)` : `가로 ${num(f.w)} · 세로 ${num(f.d)} · 높이 ${num(f.h)} cm`, f.clear === false ? h('span', { class: 'badge' }, '앞 여유 공간 없음') : null)),
               ),
               h(
                 'button',
@@ -279,6 +306,7 @@ function renderFurniture(page) {
 function openFurnitureForm(existing, onDone) {
   const name = h('input', { type: 'text', class: 'input', value: existing?.name ?? '', placeholder: '예: 침대', maxLength: 30, autocomplete: 'off' });
   const dims = { w: cmInput(existing?.w, '예: 200'), d: cmInput(existing?.d, '예: 100'), h: cmInput(existing?.h, '예: 45') };
+  const clearBox = h('input', { type: 'checkbox', checked: existing ? existing.clear !== false : true });
   const color = h('input', { type: 'color', class: 'color-input', value: safeColor(existing?.color ?? nextColor(db.furniture.map((f) => f.color))) });
   let modal;
   const form = h(
@@ -294,9 +322,20 @@ function openFurnitureForm(existing, onDone) {
         const d = readDims(dims, { zeroHeight: true });
         if (!nm || !d) return toast('이름과 크기를 확인해 주세요. 가로·세로는 0보다 커야 하고, 높이는 0(방 높이에 맞춤) 이상이어야 해요.', 4500);
         const updatedAt = Date.now(); // 다른 기기와 합칠 때 어느 쪽이 최신인지 판단하는 기준
-        if (existing) Object.assign(existing, { name: nm, ...d, color: color.value, updatedAt });
-        else db.furniture.push({ id: uid(), name: nm, ...d, color: color.value, updatedAt });
+        const needsClear = clearBox.checked;
+        let changedLayouts = 0;
+        if (existing) {
+          const before = existing.clear !== false;
+          Object.assign(existing, { name: nm, ...d, color: color.value, updatedAt });
+          setClear(existing, needsClear);
+          if (before !== needsClear) changedLayouts = applyClearToLayouts(existing.id, needsClear, updatedAt);
+        } else {
+          const created = { id: uid(), name: nm, ...d, color: color.value, updatedAt };
+          setClear(created, needsClear);
+          db.furniture.push(created);
+        }
         persist();
+        if (changedLayouts) toast(`이 가구가 들어 있는 배치도 ${changedLayouts}개에서도 앞 여유 공간 적용을 ${needsClear ? '켰어요' : '껐어요'}.`, 4000);
         modal.close();
         onDone();
       },
@@ -306,6 +345,8 @@ function openFurnitureForm(existing, onDone) {
     h('p', { class: 'hint' }, '가로는 벽을 따라 놓이는 길이, 세로는 벽에서 방 안쪽으로 나오는 깊이예요.'),
     h('p', { class: 'hint' }, '높이에 0을 넣으면 배치도를 만들 때 그 방의 높이(최대)로 맞춰져요. 천장까지 닿는 가구에 쓰세요.'),
     h('label', { class: 'field color-field' }, h('span', { class: 'field-label' }, '색'), color, h('small', null, '배치도에서 이 색으로 표시돼요.')),
+    h('label', { class: 'switch-row' }, clearBox, h('span', null, h('b', null, '앞 여유 공간 적용'), h('small', null, '끄면 이 가구 앞에는 자리를 비워 두지 않아요. 침대나 문처럼 앞에 설 자리가 필요 없는 가구에 쓰세요.'))),
+    existing ? h('p', { class: 'hint' }, '이 설정을 바꾸면 이 가구가 들어 있는 기존 배치도에도 함께 반영돼요.') : null,
   );
   modal = openModal({
     title: existing ? '가구 수정' : '가구 생성',
@@ -333,14 +374,14 @@ function thumbnail(layout) {
   return h('span', {
     class: 'thumb',
     'aria-hidden': 'true',
-    html: `<svg viewBox="${-pad} ${-pad} ${w + pad * 2} ${d + pad * 2}" preserveAspectRatio="xMidYMid meet"><rect class="thumb-floor" x="0" y="0" width="${Number(w)}" height="${Number(d)}"/>${rects}<path class="thumb-wall" d="M${Number(w)} 0H0V${Number(d)}" fill="none" stroke-width="${sw.toFixed(1)}" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    html: `<svg viewBox="${-pad} ${-pad} ${w + pad * 2} ${d + pad * 2}" preserveAspectRatio="xMidYMid meet"><rect class="thumb-floor" x="0" y="0" width="${Number(w)}" height="${Number(d)}"/>${rects}<path class="thumb-wall" d="M0 0H${Number(w)}V${Number(d)}H0Z" fill="none" stroke-width="${sw.toFixed(1)}" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   });
 }
 
 function renderLayouts(page) {
   const list = db.layouts;
   page.replaceChildren(
-    h('header', { class: 'page-head' }, h('h1', null, '배치도 관리'), h('p', null, '방 크기를 입력하면 가구를 두 벽면에 자동으로 배치해 드려요.')),
+    h('header', { class: 'page-head' }, h('h1', null, '배치도 관리'), h('p', null, '방 크기를 입력하면 가구를 벽면에 자동으로 배치해 드려요.')),
     h('button', { class: 'btn primary big', type: 'button', onclick: () => openLayoutWizard() }, icon('plus'), '배치도 생성'),
     list.length
       ? h(
@@ -428,7 +469,7 @@ function wizardRoomStep(draft) {
     h('p', { class: 'steps' }, h('b', null, '1'), ' 방 정보 ', h('i', null, '›'), ' 2 가구 선택'),
     field('방 이름', name),
     h('div', { class: 'field-row' }, field('가로', dims.w, 'cm'), field('세로', dims.d, 'cm'), field('높이', dims.h, 'cm')),
-    h('p', { class: 'hint' }, '가구는 방의 네 벽 중 서로 맞닿은 두 벽(가로 벽과 세로 벽)에만 배치돼요.'),
+    h('p', { class: 'hint' }, '가구는 방의 네 벽면을 따라 배치돼요. 안쪽 두 벽부터 채우고, 모자라면 나머지 두 벽도 써요.'),
   );
   modal = openModal({
     title: '배치도 생성',
@@ -510,7 +551,7 @@ async function createLayout(draft) {
   const items = db.furniture
     .filter((f) => draft.selected.has(f.id))
     // 높이 0 으로 등록한 가구는 이 방의 높이(놓을 수 있는 최대 높이)로 맞춘다.
-    .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h === 0 ? room.h : f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0 }));
+    .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h === 0 ? room.h : f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0, ...(f.clear === false ? { clear: false } : {}) }));
   // 배치할 때 쓴 간격·앞 여유 공간을 배치도에 함께 적어 둔다.
   // 설정이 다른 기기에서 열어도 이 배치도는 같은 기준으로 보인다.
   const rules = { gap: db.settings.gap, margin: db.settings.margin };
@@ -542,7 +583,7 @@ function resultMessage(result, total) {
   const rest = `${total}개 중 ${placed}개만 배치하고, 남은 ${total - placed}개는 인벤토리에 두었어요.`;
   // 시간이 다 됐거나 중간에 멈춘 경우에는 "불가능"이라고 단정할 수 없다.
   if (result.timedOut) return { ok: false, text: `제한 시간 안에 모두 놓는 방법을 찾지 못했어요. ${rest}` };
-  return { ok: false, text: `배치 불가능: 선택한 가구를 두 벽면에 모두 놓을 수 없어요. ${rest}` };
+  return { ok: false, text: `배치 불가능: 선택한 가구를 벽면에 모두 놓을 수 없어요. ${rest}` };
 }
 
 // ───────────────────────── 자동 배치 계산 ─────────────────────────
@@ -559,7 +600,7 @@ let activeSolve = null;
 function runSolver(room, items, { shuffle = false, gap = db.settings.gap, margin = db.settings.margin } = {}) {
   const job = {
     room,
-    items: items.map(({ id, w, d, h: height }) => ({ id, w, d, h: height })),
+    items: items.map(({ id, w, d, h: height, clear }) => ({ id, w, d, h: height, clear: clear !== false })),
     gap,
     margin,
     timeLimitMs: SOLVE_LIMIT_MS,
@@ -683,7 +724,7 @@ async function openEditor(layout) {
   const invCount = h('span', { class: 'badge' });
   const inventory = h('aside', { class: 'ed-inv' }, h('div', { class: 'inv-head' }, h('b', null, '인벤토리'), invCount, h('small', null, '끌어서 방에 놓기')), invList);
   const undoBtn = h('button', { class: 'tool', type: 'button', disabled: true, title: '되돌리기', 'aria-label': '되돌리기', onclick: () => undo() }, icon('undo'), h('span', null, '되돌리기'));
-  const arrangeBtn = h('button', { class: 'tool', type: 'button', title: '가구를 두 벽면에 다시 자동 배치', 'aria-label': '자동 배치', onclick: () => rearrange() }, icon('shuffle'), h('span', null, '자동 배치'));
+  const arrangeBtn = h('button', { class: 'tool', type: 'button', title: '가구를 벽면에 다시 자동 배치', 'aria-label': '자동 배치', onclick: () => rearrange() }, icon('shuffle'), h('span', null, '자동 배치'));
   const saveBtn = h('button', { class: 'tool save', type: 'button', disabled: true, title: '변경한 배치를 저장', onclick: () => save() }, icon('check'), h('span', null, '저장하기'));
   const backBtn = h(
     'a',
@@ -1229,6 +1270,7 @@ function renderSettings(page) {
       h('h2', null, '가구 앞 여유 공간'),
       h('p', null, '가구를 쓰려면 앞에 서거나 앉을 자리가 필요해요. 자동 배치할 때 가구 앞(벽 반대쪽)으로 이만큼은 다른 가구가 들어오지 않게 비워 둬요. 0으로 두면 여유 없이 배치해요.'),
       cmStepper('margin', 5, '가구 앞 여유 공간'),
+      h('p', { class: 'hint' }, '침대나 문처럼 앞에 설 자리가 필요 없는 가구는 가구 관리에서 "앞 여유 공간 적용"을 끄면 돼요.'),
       h('p', { class: 'hint' }, '배치도에서 가구를 누르면 이 공간이 바닥에 옅게 표시돼요. 가구를 직접 끌 때도 간격과 이 공간을 침범하는 자리로는 움직이지 않고, 편집 화면 위쪽의 버튼으로 각각 끌 수 있어요.'),
       h('p', { class: 'hint' }, '간격과 여유 공간은 배치도를 만들 때의 값이 그 배치도에 함께 저장돼요. 그래서 설정을 바꾸거나 다른 기기에서 열어도 이미 만든 배치도는 그대로예요. 다만 간격이나 앞 여유 공간이 지금 설정과 다른 배치도는 읽기 전용으로 열려서 볼 수만 있어요. 고치려면 설정을 맞추거나 배치도를 새로 만들어 주세요.'),
     ),

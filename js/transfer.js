@@ -80,7 +80,7 @@ export function parseImport(raw) {
 
   const furniture = raw.furniture.map((f) => {
     if (!isObj(f)) throw new TransferError('가구 데이터 형식이 올바르지 않아요.');
-    return {
+    const out = {
       id: str(f.id, 64, '가구 id'),
       name: str(f.name, 30, '가구 이름'),
       w: size(f.w, '가구 가로'),
@@ -89,6 +89,8 @@ export function parseImport(raw) {
       color: color(f.color),
       updatedAt: time(f.updatedAt),
     };
+    if (f.clear === false) out.clear = false; // 앞 여유 공간이 필요 없는 가구
+    return out;
   });
 
   const layouts = raw.layouts.map((l) => {
@@ -96,7 +98,7 @@ export function parseImport(raw) {
     if (l.items.length > MAX_ITEMS) throw new TransferError('배치도에 가구가 너무 많아요.');
     const items = l.items.map((it) => {
       if (!isObj(it)) throw new TransferError('배치도 데이터 형식이 올바르지 않아요.');
-      return {
+      const out = {
         id: str(it.id, 64, '가구 id'),
         fid: typeof it.fid === 'string' ? it.fid.slice(0, 64) : '',
         name: str(it.name, 30, '가구 이름'),
@@ -107,8 +109,10 @@ export function parseImport(raw) {
         placed: it.placed === true,
         x: coord(it.x),
         z: coord(it.z),
-        rot: it.rot ? 1 : 0,
+        rot: it.rot === 2 || it.rot === 3 ? it.rot : it.rot ? 1 : 0, // 등을 댄 벽(0~3)
       };
+      if (it.clear === false) out.clear = false;
+      return out;
     });
     const createdAt = time(l.createdAt);
     const out = {
