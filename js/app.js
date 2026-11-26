@@ -402,7 +402,7 @@ function renderLayouts(page) {
                   { class: 'card-text' },
                   h('b', null, l.name),
                   h('small', null, dimsText(l.room)),
-                  h('small', null, `배치 ${placed}개`, stored ? h('span', { class: 'badge warn' }, `인벤토리 ${stored}개`) : null),
+                  h('small', null, `배치 ${placed}개`, stored ? h('span', { class: 'badge' }, `인벤토리 ${stored}개`) : null),
                 ),
               ),
               h(
@@ -537,6 +537,7 @@ function wizardFurnitureStep(draft) {
         count,
         h('span', { class: 'pick-actions' }, h('button', { class: 'btn small', type: 'button', onclick: () => setAll(true) }, '전체 선택'), h('button', { class: 'btn small', type: 'button', onclick: () => setAll(false) }, '전체 해제')),
       ),
+      h('p', { class: 'hint' }, '선택하지 않은 가구는 인벤토리에 들어가요. 나중에 방으로 끌어다 놓을 수 있어요.'),
       h('div', { class: 'pick-list' }, rows.map((r) => r.el)),
     ),
     footer: [
@@ -548,21 +549,38 @@ function wizardFurnitureStep(draft) {
 
 async function createLayout(draft) {
   const room = { w: draft.w, d: draft.d, h: draft.h };
-  const items = db.furniture
-    .filter((f) => draft.selected.has(f.id))
-    // 높이 0 으로 등록한 가구는 이 방의 높이(놓을 수 있는 최대 높이)로 맞춘다.
-    .map((f) => ({ id: uid(), fid: f.id, name: f.name, w: f.w, d: f.d, h: f.h === 0 ? room.h : f.h, color: f.color, placed: false, x: 0, z: 0, rot: 0, ...(f.clear === false ? { clear: false } : {}) }));
+  // 선택하지 않은 가구도 버리지 않고 인벤토리에 넣어 둔다(aside: 자동 배치에서 빼 둔 가구).
+  // 나중에 마음이 바뀌면 방으로 끌어다 놓을 수 있다.
+  const items = db.furniture.map((f) => ({
+    id: uid(),
+    fid: f.id,
+    name: f.name,
+    w: f.w,
+    d: f.d,
+    h: f.h === 0 ? room.h : f.h, // 높이 0 으로 등록한 가구는 이 방의 높이(놓을 수 있는 최대 높이)로 맞춘다
+    color: f.color,
+    placed: false,
+    x: 0,
+    z: 0,
+    rot: 0,
+    ...(f.clear === false ? { clear: false } : {}),
+    ...(draft.selected.has(f.id) ? {} : { aside: true }),
+  }));
+  const chosen = items.filter((it) => !it.aside);
   // 배치할 때 쓴 간격·앞 여유 공간을 배치도에 함께 적어 둔다.
   // 설정이 다른 기기에서 열어도 이 배치도는 같은 기준으로 보인다.
   const rules = { gap: db.settings.gap, margin: db.settings.margin };
-  const result = await runSolver(room, items, rules);
+  const result = await runSolver(room, chosen, rules);
   if (!result) return null; // 사용자가 취소함
-  applyPlacements(items, result);
+  applyPlacements(chosen, result);
   const now = Date.now();
   const layout = { id: uid(), name: draft.name, room, ...rules, items, createdAt: now, updatedAt: now };
   db.layouts.unshift(layout);
   persist();
-  pendingNotice = { id: layout.id, message: resultMessage(result, items.length) };
+  const message = resultMessage(result, chosen.length);
+  const left = items.length - chosen.length;
+  if (left) message.text += ` 선택하지 않은 가구 ${left}개는 인벤토리에 넣어 두었어요.`;
+  pendingNotice = { id: layout.id, message };
   return layout;
 }
 
@@ -836,10 +854,12 @@ async function openEditor(layout) {
     saveBtn.disabled = !dirty;
     saveBtn.classList.toggle('dirty', dirty);
   };
+  // 사용자가 인벤토리로 보낸 가구는 자동 배치에서 빼 둔다(aside). 방으로 다시 꺼내면 포함된다.
+  // (자동 배치가 자리를 못 찾아 남긴 가구는 aside 가 아니라서, 다시 자동 배치하면 또 시도한다.)
   const stash = (ids) => {
     for (const id of ids) {
       const it = item(id);
-      if (it) it.placed = false;
+      if (it) Object.assign(it, { placed: false, aside: true });
     }
   };
   const displacedToast = (ids) => {
@@ -892,17 +912,19 @@ async function openEditor(layout) {
   }
 
   async function rearrange() {
-    if (!items.length) return toast('배치할 가구가 없어요.');
+    // 인벤토리에 빼 둔 가구(선택하지 않았거나 직접 보낸 것)는 건드리지 않는다.
+    const active = items.filter((it) => !it.aside);
+    if (!active.length) return toast('자동 배치할 가구가 없어요. 인벤토리의 가구를 방에 끌어다 놓으면 포함돼요.', 4000);
     arrangeBtn.disabled = true;
     // 이 배치도의 간격·앞 여유 공간으로 다시 배치한다.
     // (기기 설정과 다르면 읽기 전용이라 여기까지 오지 않으므로, 기기 설정과 같은 값이다.)
-    const result = await runSolver(room, items, { shuffle: true, ...rules });
+    const result = await runSolver(room, active, { shuffle: true, ...rules });
     arrangeBtn.disabled = false;
     if (!result || destroyed) return;
     snapshot();
-    applyPlacements(items, result);
+    applyPlacements(active, result);
     refresh();
-    showBanner(resultMessage(result, items.length));
+    showBanner(resultMessage(result, active.length));
   }
 
   let bannerTimer = 0;
@@ -986,6 +1008,7 @@ async function openEditor(layout) {
       if (res.blocked) return void toast('간격이나 앞 여유 공간 때문에 여기에는 놓을 수 없어요. 다른 자리에 놓거나, 위의 버튼으로 제한을 꺼 주세요.', 4500);
       snapshot();
       Object.assign(it, { placed: true, x: res.x, z: res.z, rot: res.rot });
+      delete it.aside;
       stash(res.displaced);
       displacedToast(res.displaced);
       refresh();

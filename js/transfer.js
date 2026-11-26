@@ -112,6 +112,7 @@ export function parseImport(raw) {
         rot: it.rot === 2 || it.rot === 3 ? it.rot : it.rot ? 1 : 0, // 등을 댄 벽(0~3)
       };
       if (it.clear === false) out.clear = false;
+      if (it.aside === true && !out.placed) out.aside = true; // 자동 배치에서 빼 둔 인벤토리 가구
       return out;
     });
     const createdAt = time(l.createdAt);

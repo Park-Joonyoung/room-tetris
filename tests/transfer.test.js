@@ -244,3 +244,14 @@ test('네 벽 방향(rot 0~3)과 가구별 앞 여유 공간 여부(clear)가 �
   assert.equal('clear' in out.furniture[1], false);
   assert.equal(out.layouts[0].items[0].rot, 2);
 });
+
+test('자동 배치에서 빼 둔 인벤토리 가구 표시(aside)가 옮겨진다', async () => {
+  const db = sampleDb();
+  db.layouts[0].items.push({ ...placed('i7', '소파'), placed: false, aside: true });
+  const back = await decodePayload(await encodePayload(buildExport(db)));
+  assert.deepEqual(back.layouts, db.layouts);
+  // 방에 놓인 가구에는 이 표시가 남지 않는다.
+  const d = structuredClone(buildExport(db));
+  d.layouts[0].items[0].aside = true;
+  assert.equal('aside' in parseImport(d).layouts[0].items[0], false);
+});

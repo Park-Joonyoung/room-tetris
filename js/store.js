@@ -5,7 +5,8 @@ const KEY = 'room-tetris:v1';
 const DEFAULTS = {
   furniture: [], // { id, name, w, d, h, color, updatedAt }  h 가 0 이면 배치도를 만들 때 방 높이에 맞춘다
   // gap, margin: 이 배치도를 배치할 때 쓴 간격·앞 여유 공간(설정이 다른 기기에서 열어도 같은 기준으로 보이게)
-  layouts: [], // { id, name, room:{w,d,h}, gap, margin, items:[{ id, fid, name, w, d, h, color, placed, x, z, rot }], createdAt, updatedAt }
+  // items 의 clear: false = 앞 여유 공간이 필요 없는 가구, aside: true = 자동 배치에서 빼 둔 인벤토리 가구
+  layouts: [], // { id, name, room:{w,d,h}, gap, margin, items:[{ id, fid, name, w, d, h, color, placed, x, z, rot, clear?, aside? }], createdAt, updatedAt }
   settings: { gap: 5, margin: 60, theme: 'system' }, // gap: 가구 사이 간격, margin: 가구 앞 여유 공간(cm)
 };
 
